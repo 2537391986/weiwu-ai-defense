@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {Game,WEAPONS,ACTIONS} from '../dist/engine.js';
+import {Game,WEAPONS,ACTIONS,UNIT_RADIUS,UNIT_SPACE} from '../dist/engine.js';
 import {inferPolicy,AI_META} from '../dist/ai-model.js';
 
 function accounting(g){const i=g.inventory();for(const t of Object.keys(i.acquired)){assert.ok(i.remaining[t]>=0,t+' remaining nonnegative');assert.equal(i.acquired[t],i.remaining[t]+i.fired[t]+i.lost[t],t+' ammunition conserved');}}
@@ -9,7 +9,7 @@ function burn(g,s){g.fired[WEAPONS[s.weapon].ammo]+=s.mag+s.reserve;s.mag=0;s.re
 
 test('initial equipment and every ammunition unit have a source',()=>{const g=new Game({seed:71});assert.equal(g.living().length,12);assert.equal(g.soldiers.filter(s=>s.weapon==='m4').length,8);assert.equal(g.soldiers.filter(s=>s.weapon==='m249').length,2);assert.equal(g.features().length,AI_META.featureNames.length);accounting(g);});
 
-test('haulers fetch at the depot and physically reach the recipient',()=>{const g=active();const target=g.soldiers[0],runner=g.soldiers[1];burn(g,target);for(const s of g.soldiers){s.x=240;s.y=205;s.goal=null;s.path=[];}target.x=200;target.y=145;runner.x=200;runner.y=205;g.assignSupplies();assert.equal(target.supplyAssigned,runner.id);const before=g.stock.n556;assert.equal(runner.supply.cargo,0);g.updateSupply(runner,.05);assert.ok(g.stock.n556<before);assert.equal(target.mag+target.reserve,0);for(let i=0;i<800&&runner.task==='supply';i++)g.updateSupply(runner,.05);assert.equal(runner.task,'guard');assert.ok(target.reserve>0);assert.ok(Math.hypot(runner.x-target.x,runner.y-target.y)<6.5);assert.equal(g.supplyRuns,1);accounting(g);});
+test('haulers fetch at the depot and physically reach the recipient',()=>{const g=active();const target=g.soldiers[0],runner=g.soldiers[1];burn(g,target);for(const s of g.soldiers){s.x=240;s.y=205;g.releaseOrder(s);s.guardPoint=null;}target.x=200;target.y=145;runner.x=200;runner.y=205;g.assignSupplies();assert.equal(target.supplyAssigned,runner.id);const before=g.stock.n556;assert.equal(runner.supply.cargo,0);g.updateSupply(runner,.05);assert.ok(g.stock.n556<before);assert.equal(target.mag+target.reserve,0);for(let i=0;i<800&&runner.task==='supply';i++){g.time+=.05;g.updateSupply(runner,.05);}assert.equal(runner.task,'guard');assert.ok(target.reserve>0);assert.ok(Math.hypot(runner.x-target.x,runner.y-target.y)<10.5,'handoff happens within adjacent body spacing');assert.ok(g.los(runner,target),'handoff cannot cross a wall');assert.equal(g.supplyRuns,1);accounting(g);});
 
 test('when a recipient dies, carried ammunition returns only at the depot',()=>{const g=active();const s=g.soldiers[1],target=g.soldiers[0];const qty=50;g.stock.n556-=qty;s.x=200;s.y=150;s.task='supply';s.goal=null;s.supply={type:'n556',qty,cargo:qty,targetId:target.id,phase:'deliver'};target.supplyAssigned=s.id;target.hp=0;g.killSoldier(target);const stock=g.stock.n556;g.updateSupply(s,.05);assert.equal(g.stock.n556,stock);assert.equal(s.supply.phase,'return');for(let i=0;i<800&&s.task==='supply';i++)g.updateSupply(s,.05);assert.equal(g.stock.n556,stock+qty);accounting(g);});
 
@@ -63,10 +63,88 @@ test('ordinary formation changes cannot cancel a cross-room movement before arri
 
 test('emergency retreat can interrupt an order while the body turns continuously',()=>{const g=active(),s=g.soldiers[0];for(const a of g.soldiers)if(a!==s)a.hp=0;s.x=200;s.y=205;s.vx=3;s.vy=0;s.moveHeading=0;g.releaseOrder(s);g.setGoal(s,{x:245,y:205});g.setGoal(s,{x:155,y:205},{kind:'retreat',priority:93});assert.equal(s.goal.x,155);let previous=0;for(let i=0;i<120;i++){g.move(s,1/30,3);const delta=Math.atan2(Math.sin(s.moveHeading-previous),Math.cos(s.moveHeading-previous));assert.ok(Math.abs(delta)<=2.8/30+.001);assert.ok(!g.blocked(s.x,s.y,1.7));previous=s.moveHeading;}assert.ok(s.moveHeading>2||s.moveHeading<-2);});
 
-test('supply assignments do not recruit a soldier already travelling on another order',()=>{const g=active(),target=g.soldiers[0],moving=g.soldiers[1];burn(g,target);moving.x=200;moving.y=205;g.releaseOrder(moving);g.setGoal(moving,{x:250,y:205});g.assignSupplies();assert.notEqual(target.supplyAssigned,moving.id);assert.equal(moving.task,'guard');assert.equal(moving.goal.x,250);accounting(g);});
+test('supply assignments do not recruit a soldier already travelling on another order',()=>{const g=active(),target=g.soldiers[0],moving=g.soldiers[1];burn(g,target);moving.x=200;moving.y=205;g.releaseOrder(moving);g.setGoal(moving,{x:250,y:205});const destination={...moving.goal};g.assignSupplies();assert.notEqual(target.supplyAssigned,moving.id);assert.equal(moving.task,'guard');assert.deepEqual(moving.goal,destination);accounting(g);});
 
 test('smoothed paths reach the destination around crates without grid backtracking',()=>{const g=active(),s=g.soldiers[0];for(const a of g.soldiers)if(a!==s)a.hp=0;s.x=145;s.y=155;s.vx=s.vy=0;s.moveHeading=null;g.releaseOrder(s);g.setGoal(s,{x:245,y:255});let from={x:s.x,y:s.y};for(const p of s.path){assert.ok(g.clearPath(from,p,1.8));from=p;}assert.ok(s.path.length<=5);for(let i=0;i<2400&&Math.hypot(s.x-245,s.y-255)>2.4;i++){const x=s.x,y=s.y;g.time+=1/30;g.move(s,1/30,3);assert.ok(Math.hypot(s.x-x,s.y-y)<=3/30+.001);assert.ok(!g.blocked(s.x,s.y,1.7));}assert.ok(Math.hypot(s.x-245,s.y-255)<=2.4);});
 
 test('idle guards scan independently without wandering away from their positions',()=>{const g=active();g.remaining=1000;g.spawnClock=999;const positions=g.living().map(s=>({x:s.x,y:s.y,facing:s.facing}));let scan=0;for(let i=0;i<450;i++){g.step(1/30);scan=Math.max(scan,Math.abs(g.soldiers[0].facing-positions[0].facing));}assert.ok(scan>.12);for(let i=0;i<g.soldiers.length;i++)assert.ok(Math.hypot(g.soldiers[i].x-positions[i].x,g.soldiers[i].y-positions[i].y)<.3);accounting(g);});
 
 test('brief alternating model preferences do not cause alternating tactical orders',()=>{const g=active();g.attachAI(()=>({action:'balanced',confidence:.9}));g.decide();for(let i=0;i<12;i++){g.time+=1.2;g.attachAI(()=>({action:i%2?'reinforce_east':'reinforce_west',confidence:.9}));g.decide();assert.equal(g.tactic,'balanced');}g.attachAI(()=>({action:'reinforce_west',confidence:.9}));for(let i=0;i<4;i++){g.time+=1.2;g.decide();}assert.equal(g.tactic,'reinforce_west');for(let i=0;i<6;i++){const z=g.spawnEnemy('walker',0);z.x=200;z.y=190;z.entered=z.inside=true;}g.attachAI(()=>({action:'fallback',confidence:.9}));g.decide();assert.equal(g.tactic,'fallback');});
+
+function movement(g,seconds,stopWhenArrived=true){
+ for(let i=0;i<seconds*30;i++){
+  g.time+=1/30;
+  for(const s of g.living())g.move(s,1/30,3);
+  g.resolveBodies(1/30);
+  for(const s of g.living())assert.ok(g.insideRoom(s)&&!g.blocked(s.x,s.y,UNIT_RADIUS+.2),'a complete body stays clear of walls and crates');
+  if(stopWhenArrived&&g.living().every(s=>!g.inTransit(s)))return;
+ }
+}
+function spaced(units,point=s=>s,gap=7.1){
+ for(let i=0;i<units.length;i++)for(let j=i+1;j<units.length;j++)assert.ok(Math.hypot(point(units[i]).x-point(units[j]).x,point(units[i]).y-point(units[j]).y)>=gap-.01,`#${units[i].id} and #${units[j].id} have separate space`);
+}
+
+test('mixed squads reserve separate body-sized positions on every map at 14, 25 and 35 people',()=>{
+ for(const count of [14,25,35])for(const template of ['warehouse','house','yard']){
+  const g=new Game({seed:71});
+  while(g.living().length<count)g.addSoldier(['m4','benelli','m249','m110','m203','mp5'][g.living().length%6]);
+  g.deploy();g.start();g.enterNode({template,mode:'hold',danger:0,flavor:'ammo',name:template});
+  for(const s of g.living()){assert.ok(s.goal);assert.ok(!g.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2));}
+  spaced(g.living(),s=>s.goal,UNIT_SPACE-.05);spaced(g.living());accounting(g);
+ }
+});
+
+test('six soldiers crowded at the warehouse crate corner disperse and reach their own positions',()=>{
+ for(const count of [14,25,35]){
+  const g=new Game({seed:71});while(g.living().length<count)g.addSoldier('m4');g.deploy();
+  for(const [i,s] of g.soldiers.slice(0,6).entries()){s.x=176+(i%2)*.4;s.y=183+Math.floor(i/2)*.4;s.vx=s.vy=0;s.path=g.findPath(s,s.goal)||[];}
+  const destinations=g.living().map(s=>({...s.goal}));movement(g,120);
+  assert.ok(g.living().every(s=>!g.inTransit(s)),'no soldier remains stuck at the corner');
+  assert.deepEqual(g.living().map(s=>s.goal),destinations,'recovery preserves the assigned destinations');spaced(g.living());accounting(g);
+ }
+});
+
+test('a full 35-person squad can cross the room without ending in a traffic deadlock',()=>{
+ const g=new Game({seed:71});while(g.living().length<35)g.addSoldier('m4');g.deploy();
+ const destinations=g.living().map(s=>({x:400-s.x,y:410-s.y}));
+ for(const s of g.living()){g.releaseOrder(s);s.guardPoint=null;}
+ for(let i=0;i<35;i++)assert.ok(g.setGoal(g.soldiers[i],destinations[i]));
+ movement(g,180);assert.ok(g.living().every(s=>!g.inTransit(s)),'all 35 complete their movement');spaced(g.living());accounting(g);
+});
+
+test('opposing soldiers use a wider pocket to pass through a single-file gap',()=>{
+ const g=new Game({seed:71}),[a,b]=g.soldiers;
+ for(const s of g.soldiers){s.hp=s===a||s===b?100:0;g.releaseOrder(s);s.guardPoint=null;}
+ g.map.crates=[{x:147,y:175,w:100,h:65}];a.x=b.x=140;a.y=155;b.y=260;
+ assert.ok(g.setGoal(a,{x:140,y:260}));assert.ok(g.setGoal(b,{x:140,y:155}));
+ movement(g,160);assert.ok(!g.inTransit(a)&&!g.inTransit(b));assert.ok(a.y>b.y+80);spaced([a,b]);
+});
+
+test('an unreachable destination does not fall back to walking straight through an obstacle',()=>{
+ const g=new Game({seed:71}),s=g.soldiers[0];for(const a of g.soldiers)if(a!==s)a.hp=0;
+ g.map.crates=[{x:190,y:135,w:20,h:140}];s.x=155;s.y=205;g.releaseOrder(s);s.guardPoint=null;
+ const destination={x:245,y:205};assert.equal(g.findPath(s,destination),null);assert.equal(g.setGoal(s,destination),false);
+ movement(g,10,false);assert.equal(s.x,155);assert.equal(s.y,205);
+});
+
+test('multiple haulers use distinct depot positions and complete nearby physical handoffs',()=>{
+ const g=active();g.remaining=1000;g.spawnClock=999;g.tactic='resupply';
+ for(const s of g.soldiers.slice(0,3))burn(g,s);
+ g.assignSupplies();const carriers=g.living().filter(s=>s.task==='supply');assert.equal(carriers.length,3);
+ for(const s of carriers)assert.ok(s.goal&&Math.hypot(s.goal.x-200,s.goal.y-205)<18);
+ spaced(carriers,s=>s.goal,UNIT_SPACE-.05);
+ for(let i=0;i<5400&&g.supplyRuns<3;i++)g.step(1/30);
+ assert.ok(g.supplyRuns>=3,'all requests finish without a depot pileup');
+ assert.ok(g.soldiers.slice(0,3).every(s=>s.mag+s.reserve>0));accounting(g);
+});
+
+test('a crowded old save gains safe routes while preserving the run and ammunition',()=>{
+ const g=active(),v=JSON.parse(g.serialize()),before=g.inventory();delete v.trafficMigration;
+ for(const s of v.soldiers){delete s.nav;delete s.guardPoint;}
+ for(const s of v.soldiers.slice(0,6)){s.x=173;s.y=174;}
+ const restored=Game.restore(v,inferPolicy);restored.remaining=1000;restored.spawnClock=999;
+ assert.deepEqual(restored.inventory(),before);
+ for(let i=0;i<2400;i++)restored.step(1/30);
+ assert.equal(restored.dead,g.dead);assert.equal(restored.nodeIndex,g.nodeIndex);
+ assert.ok(restored.living().every(s=>!restored.blocked(s.x,s.y,UNIT_RADIUS+.2)));spaced(restored.living());accounting(restored);
+});
