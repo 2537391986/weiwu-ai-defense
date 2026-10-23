@@ -43,7 +43,25 @@ test('one shotgun shell produces separate pellets without creating ammunition',(
 
 test('reinforcement transfers at most two nearby soldiers and keeps quiet sides occupied',()=>{const g=active(),before=new Map(g.living().map(s=>[s.id,s.side])),positions=g.living().map(s=>[s.x,s.y]);g.attachAI(()=>({action:'reinforce_west',confidence:.95}));g.decide();assert.ok(g.living().filter(s=>before.get(s.id)!==s.side).length<=2);assert.ok(g.living().filter(s=>s.side===3).length>g.living().filter(s=>s.side===1).length);assert.ok([0,1,2,3].every(side=>g.living().some(s=>s.side===side)));assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions);});
 
-test('a threatened lane falls back in two elements while quiet lanes hold',()=>{const g=active();g.time=10;g.attachAI(()=>({action:'fallback',confidence:.95}));for(let i=0;i<2;i++){const z=g.spawnEnemy('walker',0);z.x=200+i*5;z.y=164;z.entered=z.inside=true;}g.decide();const north=g.living().filter(s=>s.side===0),quiet=g.living().filter(s=>s.side===2);assert.ok(north.some(s=>s.retreating));assert.ok(north.some(s=>!s.retreating));assert.ok(quiet.every(s=>!s.retreating));g.time+=1.3;g.coordinate();assert.ok(north.every(s=>s.retreating));const depth=g.lanes[0].depth;g.enemies=[];g.tactic='balanced';g.coordinate();assert.equal(g.lanes[0].depth,depth,'avoid oscillating back immediately');g.time+=7;g.coordinate();assert.equal(g.lanes[0].depth,0);});
+test('a threatened group withdraws under cover, then hands cover to the first arrival',()=>{
+ const g=active();g.time=10;g.tactic='fallback';
+ for(let i=0;i<2;i++){const z=g.spawnEnemy('walker',0);z.x=200+i*5;z.y=164;z.entered=z.inside=true;}
+ const quiet=g.living().filter(s=>s.side===2),quietPositions=quiet.map(s=>[s.x,s.y]);
+ g.coordinate();const north=g.living().filter(s=>s.side===0),first=north.find(s=>s.coop?.role==='move'),cover=north.find(s=>s.coop?.role==='cover');
+ assert.ok(first&&cover);assert.equal(cover.coop.partnerId,first.id);const coverPosition={x:cover.x,y:cover.y};
+ g.time+=1.3;g.coordinate();assert.equal(north.filter(s=>g.inTransit(s)).length,1,'the next element waits for arrival, rather than a fixed short timer');
+ assert.deepEqual({x:cover.x,y:cover.y},coverPosition);
+ let handedOver=false;const moved=new Set([first.id]);
+ for(let i=0;i<600;i++){
+  g.time+=1/30;for(const s of g.living())g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();
+  assert.ok(north.filter(s=>g.inTransit(s)).length<=1,'one ordinary move at a time within the group');
+  for(const s of north)if(g.inTransit(s)&&s.order?.kind==='retreat')moved.add(s.id);
+  if(first.coop?.role==='cover'&&first.coop.partnerId!==first.id)handedOver=true;
+ }
+ assert.equal(moved.size,north.length);assert.ok(handedOver,'the first arrival covers the following teammate');
+ assert.ok(north.every(s=>!g.inTransit(s)));assert.deepEqual(quiet.map(s=>[s.x,s.y]),quietPositions);
+ g.enemies=[];g.tactic='balanced';g.coordinate();assert.equal(g.lanes[0].depth,0);accounting(g);
+});
 
 test('a reloading soldier steps back while an armed teammate covers the entrance',()=>{const g=active(),group=g.living().filter(s=>s.side===0),reloading=group.find(s=>s.weapon==='m4');reloading.reload=2;g.coordinate();const covering=group.find(s=>s.covering);assert.ok(covering);assert.notEqual(covering.id,reloading.id);assert.ok(covering.mag>0);assert.ok(covering.holdPoint.y<reloading.holdPoint.y);});
 
@@ -147,4 +165,86 @@ test('a crowded old save gains safe routes while preserving the run and ammuniti
  for(let i=0;i<2400;i++)restored.step(1/30);
  assert.equal(restored.dead,g.dead);assert.equal(restored.nodeIndex,g.nodeIndex);
  assert.ok(restored.living().every(s=>!restored.blocked(s.x,s.y,UNIT_RADIUS+.2)));spaced(restored.living());accounting(restored);
+});
+
+test('fireteams keep two or three members, including a hauler who temporarily leaves their position',()=>{
+ for(const count of [12,14,25,35]){
+  const g=new Game({seed:71});while(g.living().length<count)g.addSoldier('m4');g.deploy();
+  const members=g.fireteams.flatMap(t=>t.members);assert.equal(new Set(members).size,count);assert.equal(members.length,count);
+  assert.ok(g.fireteams.every(t=>t.members.length>=2&&t.members.length<=3));
+  const roster=g.fireteams.map(t=>({id:t.id,side:t.side,members:[...t.members]})),positions=g.living().map(s=>[s.x,s.y]);
+  const carrier=g.soldiers[0];carrier.task='supply';g.coordinate();carrier.task='guard';g.coordinate();
+  assert.deepEqual(g.fireteams.map(t=>({id:t.id,side:t.side,members:[...t.members]})),roster);
+  assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions);accounting(g);
+ }
+});
+
+test('a covering teammate stays at their position and actually fires while their buddy reloads',()=>{
+ const g=active();g.remaining=1000;g.spawnClock=999;g.attachAI(()=>({action:'balanced',confidence:.95}));
+ const reloader=g.soldiers[0];g.fired.n556+=reloader.mag;reloader.mag=0;reloader.reload=WEAPONS[reloader.weapon].reload;
+ const z=g.spawnEnemy('walker',0);z.x=200;z.y=120;z.speed=0;z.hp=z.max=5000;
+ g.coordinate();const cover=g.living().find(s=>s.coop?.role==='cover'&&s.coop.partnerId===reloader.id);assert.ok(cover);
+ const position={x:cover.x,y:cover.y},start={x:reloader.x,y:reloader.y},shots=cover.shots,since=cover.coop.since;
+ for(let i=0;i<60;i++)g.step(1/30);
+ assert.ok(reloader.reload>0);assert.ok(Math.hypot(reloader.x-start.x,reloader.y-start.y)>2);
+ assert.ok(cover.shots>shots,'cover is normal ammunition-consuming fire');
+ assert.ok(Math.hypot(cover.x-position.x,cover.y-position.y)<.8,'covering buddy stays in place');
+ assert.equal(cover.coop.since,since,'holding the same assignment does not restart its animation');accounting(g);
+});
+
+test('a rear defender replaces a fallen front soldier while their remaining buddy covers',()=>{
+ const g=active(),front=g.soldiers[0],rear=g.soldiers[8],buddy=g.soldiers[4],quiet=g.living().filter(s=>s.side!==0),positions=quiet.map(s=>[s.x,s.y]);
+ const oldRear={x:rear.x,y:rear.y},buddyPosition={x:buddy.x,y:buddy.y};front.hp=0;g.killSoldier(front);g.coordinate();
+ assert.equal(rear.formationSlot,0);assert.equal(rear.order.kind,'relief');assert.equal(buddy.coop.role,'cover');assert.equal(buddy.coop.partnerId,rear.id);
+ assert.deepEqual({x:buddy.x,y:buddy.y},buddyPosition);
+ for(let i=0;i<300;i++){g.time+=1/30;for(const s of g.living())g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();}
+ assert.ok(rear.y<oldRear.y-4);assert.ok(!g.inTransit(rear));assert.deepEqual(quiet.map(s=>[s.x,s.y]),positions);accounting(g);
+});
+
+test('supply selection preserves the last armed cover for a busy group',()=>{
+ const g=active(),cover=g.soldiers[0],reloader=g.soldiers[4],empty=g.soldiers[8],target=g.soldiers[1];
+ reloader.reload=3;burn(g,empty);burn(g,target);cover.x=200;cover.y=205;g.releaseOrder(cover);g.setGoal(cover,{x:200,y:220});cover.x=cover.goal.x;cover.y=cover.goal.y;cover.path=[];
+ assert.equal(g.canLeaveForSupply(cover),false);g.assignSupplies();assert.equal(cover.task,'guard');assert.equal(cover.supply,null);accounting(g);
+});
+
+test('losing the covering buddy releases the remaining group instead of leaving it waiting forever',()=>{
+ const g=active();g.time=10;g.tactic='fallback';
+ for(let i=0;i<2;i++){const z=g.spawnEnemy('walker',0);z.x=200+i*5;z.y=164;z.entered=z.inside=true;}
+ g.coordinate();const cover=g.living().find(s=>s.side===0&&s.coop?.role==='cover');assert.ok(cover);cover.hp=0;g.killSoldier(cover);
+ for(let i=0;i<900;i++){g.time+=1/30;for(const s of g.living())g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();}
+ const north=g.living().filter(s=>s.side===0);assert.ok(north.every(s=>!g.inTransit(s)));assert.ok(north.every(s=>s.coop?.partnerId!==cover.id));accounting(g);
+});
+
+test('an empty magazine reloads even when every teammate is also empty',()=>{
+ const g=active();g.remaining=1000;g.spawnClock=999;
+ const team=g.teamFor(g.soldiers[0]),members=team.members.map(id=>g.soldiers.find(s=>s.id===id));
+ for(const s of members){g.fired[WEAPONS[s.weapon].ammo]+=s.mag;s.mag=0;}
+ g.step(1/30);assert.ok(members.every(s=>s.reload>0),'do not wait for impossible cover before loading an empty weapon');accounting(g);
+});
+
+test('0.2.2 saves gain group assignments without changing positions, goals or finite inventory',()=>{
+ const g=active(),v=JSON.parse(g.serialize()),before=g.inventory(),positions=g.living().map(s=>[s.x,s.y]),goals=g.living().map(s=>s.goal);
+ delete v.fireteams;delete v.nextTeamId;delete v.teamRoster;for(const s of v.soldiers){delete s.teamId;delete s.coop;delete s.relief;}
+ const h=Game.restore(v,inferPolicy);assert.deepEqual(h.inventory(),before);assert.deepEqual(h.living().map(s=>[s.x,s.y]),positions);assert.deepEqual(h.living().map(s=>s.goal),goals);
+ assert.equal(h.fireteams.flatMap(t=>t.members).length,h.living().length);
+ const restoredAgain=Game.restore(h.serialize(),inferPolicy);for(let i=0;i<180;i++){h.step(1/30);restoredAgain.step(1/30);}
+ assert.equal(h.serialize(),restoredAgain.serialize());accounting(h);
+});
+
+test('covering fire prioritizes a visible intruder threatening the protected teammate',()=>{
+ const g=active(),cover=g.soldiers[0],buddy=g.soldiers[4];
+ for(const s of g.soldiers)if(s!==cover&&s!==buddy)s.hp=0;
+ cover.x=200;cover.y=190;buddy.x=220;buddy.y=210;
+ const nearer=g.spawnEnemy('walker',0),threat=g.spawnEnemy('walker',1);
+ Object.assign(nearer,{x:185,y:191,entered:true,inside:true});Object.assign(threat,{x:225,y:210,entered:true,inside:true});
+ cover.coop={role:'hold',partnerId:null,reason:'',since:0};assert.equal(g.chooseTarget(cover,[nearer,threat],g.living(),new Map()),nearer);
+ g.setCoop(cover,'cover',buddy.id,'retreat');assert.equal(g.chooseTarget(cover,[nearer,threat],g.living(),new Map()),threat);
+});
+
+test('a critically threatened coverer can escape without waiting and is not still advertised as cover',()=>{
+ const g=active();g.time=10;g.tactic='fallback';
+ for(let i=0;i<2;i++){const z=g.spawnEnemy('walker',0);z.x=200+i*5;z.y=164;z.entered=z.inside=true;}
+ g.coordinate();const cover=g.living().find(s=>s.side===0&&s.coop?.role==='cover');assert.ok(cover);
+ cover.hp=20;g.time+=1.3;g.coordinate();assert.equal(cover.order.kind,'retreat');assert.ok(g.inTransit(cover));assert.notEqual(cover.coop.role,'cover');
+ const team=g.teamFor(cover);assert.notEqual(team.coverId,cover.id);assert.ok(g.living().filter(s=>s.side===0&&s.coop?.role==='move').length>=2);accounting(g);
 });
