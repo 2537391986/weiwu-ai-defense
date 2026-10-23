@@ -12,7 +12,7 @@ Buildless mobile web roguelike. Serve `dist/`; no installation, API credentials,
 
 ## AI
 
-`dist/ai-model.js` contains an actually trained, dependency-free 3,032-parameter 24→48→32→8 MLP. It runs every four simulation seconds and selects high-level tactics. The game owns collision, line of sight, shooting, ammo accounting and hauling. Switching AI off uses the engine's ordinary rule policy.
+`dist/ai-model.js` contains an actually trained, dependency-free 3,032-parameter 24→48→32→8 MLP. It runs every 1.2 simulation seconds and selects high-level tactics. The model selects reinforcement, fallback, supply and target emphasis; a local squad controller implements nearest-unit transfers, staggered fallback, reload covering and firing-lane repositioning. The game owns acceleration, avoidance, collision, projectile travel, ammo accounting and physical hauling. The model and the action controller are distinct; the controller is hand-authored, not learned. Switching AI off uses the engine's ordinary rule policy.
 
 Training uses supervised imitation of a hand-authored synthetic utility teacher, **not reinforcement learning**. Synthetic heldout teacher agreement is **not a game win rate**. `ai/model-report.json` and `ai/README.md` document the model, reproduction and limits.
 
