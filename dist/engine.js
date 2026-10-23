@@ -1,4 +1,5 @@
-export const VERSION='0.2.1';
+export const VERSION='0.2.2';
+export const UNIT_RADIUS=3.3,UNIT_SPACE=9;
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
 export const ACTION_LABELS=['均衡防守','北侧增援','东侧增援','南侧增援','西侧增援','优先补给','收缩防线','集火重型'];
@@ -74,7 +75,7 @@ export class Game{
   this.kills=0;this.spawned=0;this.dead=0;this.rewardCount=0;this.routeHistory=[];
   this.mod={reload:1,carry:1,armor:0,doors:1};this.tactic='balanced';this.decisionAge=99;this.decisions=0;this.neuralDecisions=0;
   this.aiState={action:'balanced',confidence:0,source:aiEnabled?'loading':'rules',reason:'等待战术态势'};
-  this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;this.coordinationAge=99;this.lanes=[];this.tacticChangedAt=-99;this.tacticCandidate=null;
+  this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;this.coordinationAge=99;this.lanes=[];this.tacticChangedAt=-99;this.tacticCandidate=null;this.trafficMigration=false;
   this.map=this.makeMap('warehouse');this.core={...CENTER,hp:1500,max:1500};this.setupGates();
   for(let i=0;i<12;i++)this.addSoldier(i<8?'m4':i<10?'benelli':'m249',false);
   this.deploy();this.log('全队集结','12名队员已就位。选择路线后自动部署。');
@@ -87,7 +88,8 @@ export class Game{
   if(this.living().length>=35)return null;
   const w=WEAPONS[weapon];
   if(giveAmmo)this.gainAmmo(w.ammo,weapon==='m4'?90:w.carry);
-  const s={id:this.id++,x:200,y:205,hp:100,maxHP:100,weapon,mag:0,reserve:0,cooldown:this.rng.next(),reload:0,burst:0,side:0,goal:null,path:[],task:'guard',supply:null,supplyAssigned:null,travel:0,kills:0,shots:0,armor:0,vx:0,vy:0,facing:0,recoil:0,targetId:null,activity:'guard',maneuverUntil:0,formationSlot:null,formationSide:null,order:null,moveHeading:null,turnVelocity:0};
+  const s={id:this.id++,x:200,y:205,hp:100,maxHP:100,weapon,mag:0,reserve:0,cooldown:this.rng.next(),reload:0,burst:0,side:0,goal:null,path:[],task:'guard',supply:null,supplyAssigned:null,travel:0,kills:0,shots:0,armor:0,vx:0,vy:0,facing:0,recoil:0,targetId:null,activity:'guard',maneuverUntil:0,formationSlot:null,formationSide:null,order:null,moveHeading:null,turnVelocity:0,guardPoint:null,nav:{lastCheck:0,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0}};
+  const spawn=this.freePoint(s,CENTER,'spawn');if(spawn){s.x=spawn.x;s.y=spawn.y;}
   this.soldiers.push(s);
   this.takeAmmo(s,w.carry);
   return s;
@@ -125,7 +127,7 @@ export class Game{
   this.nodeIndex++;this.node={...choice};this.routeHistory.push({...choice,stage:this.nodeIndex});
   this.wave=0;this.nodeTime=0;this.enemies=[];this.projectiles=[];this.effects=[];this.lanes=[];
   this.map=this.makeMap(choice.template);this.setupGates();this.core={...CENTER,hp:1500,max:1500};
-  for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.order=null;s.mount=null;s.setup=3;s.vx=s.vy=0;s.moveHeading=null;s.targetId=null;s.localOffset=null;s.maneuverUntil=this.time;}
+  for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.order=null;s.guardPoint=null;s.nav={lastCheck:this.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};s.mount=null;s.setup=3;s.vx=s.vy=0;s.moveHeading=null;s.targetId=null;s.localOffset=null;s.maneuverUntil=this.time;const safe=this.freePoint(s,s,'spawn');if(this.blocked(s.x,s.y,UNIT_RADIUS+.2)&&safe){s.x=safe.x;s.y=safe.y;}}
   this.deploy();this.beginWave();
   this.log('据点 '+(this.nodeIndex+1),choice.name+' · '+(choice.mode==='hold'?'限时坚守':'清剿')+'。幸存者恢复生命，弹药按原库存保留。');
   return true;
@@ -184,12 +186,12 @@ export class Game{
     const delay=(slot%2)*1.2,retreat=this.time-lane.since<delay?lane.previous:lane.depth;
     let depthBase=w.fixed?14:s.weapon==='benelli'?8:s.weapon==='m249'?17:s.weapon==='m110'||s.weapon==='m203'?21:11;
     const settled=!this.inTransit(s),covering=lane.coverIds.includes(s.id);
-    depthBase+=Math.floor(slot/3)*7+retreat+(s.reload>0&&settled?6:0)-(covering?3:0);
-    let offset=(slot%3-1)*6.2;
+    depthBase+=Math.floor(slot/2)*9+retreat+(s.reload>0&&settled?8:0)-(covering?3:0);
+    let offset=(slot%2?1:-1)*(Math.floor(slot/2)%2?9:4.5);
     if(s.localOffset&&(s.localOffset.until>this.time||pressure[side]>0))offset+=s.localOffset.amount;
     else s.localOffset=null;
-    let point=this.formationPoint(side,depthBase,offset);
-    if(this.blocked(point.x,point.y,2))point=this.formationPoint(side,depthBase+9,offset);
+    let point=s.localOffset?.point&&retreat===0?s.localOffset.point:this.formationPoint(side,depthBase,offset);
+    if(this.blocked(point.x,point.y,UNIT_RADIUS+.2))point=this.formationPoint(side,depthBase+9,offset);
     const kind=retreat>0?'retreat':s.reload>0&&settled?'reload':covering?'cover':s.localOffset?'reposition':'formation';
     this.setGoal(s,point,{kind,priority:retreat>0?80+retreat:kind==='reload'?30:covering?25:kind==='reposition'?20:10});
     s.covering=covering;s.retreating=retreat>0;s.holdPoint={...(s.goal||point)};
@@ -236,74 +238,142 @@ export class Game{
   for(const o of [...this.map.walls,...this.map.crates])if(x>o.x-r&&x<o.x+o.w+r&&y>o.y-r&&y<o.y+o.h+r)return true;
   return false;
  }
- inTransit(s){return !!s.goal&&dist(s,s.goal)>2.4;}
- releaseOrder(s){s.goal=null;s.path=[];s.order=null;}
- clearPath(a,b,r=2){return ![...this.map.walls,...this.map.crates].some(o=>segmentHit(a,b,{x:o.x-r,y:o.y-r,w:o.w+r*2,h:o.h+r*2}));}
- walkablePoint(p){
-  if(!this.blocked(p.x,p.y,2))return {x:p.x,y:p.y};
-  for(let radius=3;radius<=15;radius+=3)for(let i=0;i<12;i++){const a=i*Math.PI/6,q={x:p.x+Math.cos(a)*radius,y:p.y+Math.sin(a)*radius};if(!this.blocked(q.x,q.y,2))return q;}
-  return {x:p.x,y:p.y};
+ inTransit(s){return !!s.goal&&dist(s,s.goal)>1.2;}
+ releaseOrder(s){s.goal=null;s.path=[];s.order=null;if(s.nav){s.nav.waitUntil=0;s.nav.waitFor=null;s.nav.yield=null;}}
+ clearPath(a,b,r=UNIT_RADIUS+.2,avoid=[]){
+  if([...this.map.walls,...this.map.crates].some(o=>segmentHit(a,b,{x:o.x-r,y:o.y-r,w:o.w+r*2,h:o.h+r*2})))return false;
+  return !avoid.some(o=>{if(!o.r)return segmentHit(a,b,{x:o.x-r,y:o.y-r,w:o.w+r*2,h:o.h+r*2});if(dist(a,o)<o.r+.05)return (b.x-a.x)*(a.x-o.x)+(b.y-a.y)*(a.y-o.y)<0;return circleEntry(a,b,o,o.r)!==null;});
  }
- setGoal(s,p,{kind=s.task==='supply'?'supply':'formation',priority=s.task==='supply'?40:10,force=false,follow=false}={}){
-  const point=this.walkablePoint(p),changed=s.goal?dist(s.goal,point):Infinity;
-  if(changed<1.5)return false;
-  if(s.goal&&s.order&&!force){
-   const emergency=priority>=80&&priority>=s.order.priority;
-   const following=follow&&s.order.kind===kind&&changed>8&&this.time-s.order.issuedAt>=1.8;
-   if(!emergency&&!following){
-    if(this.inTransit(s))return false;
-    if(s.order.arrivedAt===null)s.order.arrivedAt=this.time;
-    const hold=s.order.kind==='cover'||s.order.kind==='reload'?1.2:2.8;
-    if(this.time-s.order.arrivedAt<hold)return false;
-   }
+ insideRoom(p){const h=this.map.house;return p.x>=h.x+UNIT_RADIUS+.4&&p.x<=h.x+h.w-UNIT_RADIUS-.4&&p.y>=h.y+UNIT_RADIUS+.4&&p.y<=h.y+h.h-UNIT_RADIUS-.4;}
+ destinationFree(s,p,kind='formation'){
+  if(!this.insideRoom(p)||this.blocked(p.x,p.y,UNIT_RADIUS+.2))return false;
+  if(!kind.startsWith('supply')&&kind!=='spawn'&&kind!=='yield'&&dist(p,CENTER)<14)return false;
+  for(const a of this.soldiers){
+   if(a===s||a.hp<=0)continue;
+   const claims=[a.goal,a.guardPoint,a.nav?.yield?.point].filter(Boolean);
+   if(claims.some(q=>dist(p,q)<UNIT_SPACE-.05))return false;
+   if((kind==='spawn'||!this.inTransit(a))&&dist(p,a)<UNIT_SPACE-.05)return false;
   }
-  s.goal=point;s.path=this.findPath(s,point);s.ordersIssued=(s.ordersIssued||0)+1;
-  s.order={kind,priority,issuedAt:this.time,arrivedAt:dist(s,point)<=2.4?this.time:null};
   return true;
  }
- findPath(a,b){
-  if(this.clearPath(a,b))return [{...b}];
-  const step=5,start=[Math.round(a.x/step),Math.round(a.y/step)],end=[Math.round(b.x/step),Math.round(b.y/step)];
-  const key=(x,y)=>x+','+y,open=[{x:start[0],y:start[1],g:0,f:0}],seen=new Map(),done=new Set();seen.set(key(...start),{parent:null,g:0});
-  let last=null,iterations=0;
-  while(open.length&&iterations++<1800){
-   open.sort((a,b)=>a.f-b.f);const n=open.shift(),k=key(n.x,n.y);if(done.has(k))continue;done.add(k);
-   if(n.x===end[0]&&n.y===end[1]){last=n;break;}
-   for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]){
-    const x=n.x+dx,y=n.y+dy,nk=key(x,y),point={x:x*step,y:y*step};
-    if(x<27||x>53||y<28||y>54||this.blocked(point.x,point.y,2)||done.has(nk)||!this.clearPath({x:n.x*step,y:n.y*step},point))continue;
-    const g=n.g+Math.hypot(dx,dy),old=seen.get(nk);if(!old||g<old.g){seen.set(nk,{g,parent:k});open.push({x,y,g,f:g+Math.hypot(x-end[0],y-end[1])});}
-   }
+ freePoint(s,p,kind='formation',limit=35){
+  if(this.destinationFree(s,p,kind))return {x:p.x,y:p.y};
+  for(let radius=3;radius<=limit;radius+=3){
+   const points=[];for(let i=0;i<24;i++){const a=i*Math.PI/12,q={x:p.x+Math.cos(a)*radius,y:p.y+Math.sin(a)*radius};if(this.destinationFree(s,q,kind))points.push(q);}
+   points.sort((a,b)=>dist(s,a)-dist(s,b));if(points.length)return points[0];
   }
-  if(!last)return [{...b}];
-  const raw=[{...b}];let k=key(last.x,last.y);
-  while(k){const [x,y]=k.split(',').map(Number);raw.push({x:x*step,y:y*step});k=seen.get(k)?.parent;}
-  raw.reverse();const smooth=[];let from={x:a.x,y:a.y},i=1;
-  while(i<raw.length){let far=i;for(let j=i;j<raw.length;j++)if(this.clearPath(from,raw[j]))far=j;smooth.push(raw[far]);from=raw[far];i=far+1;}
-  return smooth.length?smooth:[{...b}];
+  return null;
+ }
+ walkablePoint(p){
+  if(this.insideRoom(p)&&!this.blocked(p.x,p.y,UNIT_RADIUS+.2))return {x:p.x,y:p.y};
+  for(let radius=3;radius<=30;radius+=3)for(let i=0;i<24;i++){const a=i*Math.PI/12,q={x:p.x+Math.cos(a)*radius,y:p.y+Math.sin(a)*radius};if(this.insideRoom(q)&&!this.blocked(q.x,q.y,UNIT_RADIUS+.2))return q;}
+  return null;
+ }
+ setGoal(s,p,{kind=s.task==='supply'?'supply':'formation',priority=s.task==='supply'?40:10,force=false,follow=false}={}){
+  if(!p)return false;
+  const oldInvalid=s.goal&&(this.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2)||this.soldiers.some(a=>a!==s&&a.hp>0&&a.id<s.id&&a.goal&&dist(a.goal,s.goal)<UNIT_SPACE-.05));
+  // Hold a safe reservation instead of choosing a different nearby vacancy every update.
+  if(!oldInvalid&&s.goal&&dist(s.goal,p)<1.5)return false;
+  if(s.goal&&s.order&&!force&&!oldInvalid){
+   const emergency=priority>=80&&priority>=s.order.priority;
+   const following=follow&&s.order.kind===kind&&dist(s.goal,p)>8&&this.time-s.order.issuedAt>=1.8;
+   if(!emergency&&!following){if(this.inTransit(s))return false;if(s.order.arrivedAt===null)s.order.arrivedAt=this.time;const immediate=(kind==='reload'||kind==='cover')&&priority>s.order.priority,hold=s.order.kind==='cover'||s.order.kind==='reload'?1.2:2.8;if(!immediate&&this.time-s.order.arrivedAt<hold)return false;}
+  }
+  // The chosen vacancy remains reserved even when its desired formation point is occupied.
+  if(!oldInvalid&&!force&&s.goal&&s.order?.kind===kind&&s.order.request&&dist(s.order.request,p)<1.5)return false;
+  const point=kind==='mount'?{x:p.x,y:p.y}:this.freePoint(s,p,kind);
+  if(!point)return false;
+  const path=this.findPath(s,point);if(!path)return false;
+  s.goal=point;s.path=path;s.ordersIssued=(s.ordersIssued||0)+1;
+  if(!kind.startsWith('supply')&&kind!=='yield')s.guardPoint={...point};
+  s.order={kind,priority,issuedAt:this.time,arrivedAt:dist(s,point)<=2.4?this.time:null,request:{x:p.x,y:p.y}};
+  s.nav??={};s.nav.lastCheck=this.time;s.nav.remaining=this.pathRemaining(s);s.nav.stalled=0;s.nav.waitUntil=0;s.nav.waitFor=null;s.nav.yield=null;
+  return true;
+ }
+ findPath(a,b,avoid=[]){
+  if(!b||!this.insideRoom(b)||this.blocked(b.x,b.y,UNIT_RADIUS+.2))return null;
+  if(this.clearPath(a,b,UNIT_RADIUS+.2,avoid))return [{x:b.x,y:b.y}];
+  const nodes=[{x:a.x,y:a.y},{x:b.x,y:b.y}],margin=UNIT_RADIUS+.9,candidates=[];
+  for(const o of this.map.crates)for(const x of [o.x-margin,o.x+o.w+margin])for(const y of [o.y-margin,o.y+o.h+margin])candidates.push({x,y});
+  for(const o of avoid)for(let i=0;i<8;i++){const angle=i*Math.PI/4;candidates.push({x:o.x+Math.cos(angle)*(o.r+.9),y:o.y+Math.sin(angle)*(o.r+.9)});}
+  for(const p of candidates)if(this.insideRoom(p)&&!this.blocked(p.x,p.y,UNIT_RADIUS+.2)&&!avoid.some(o=>dist(p,o)<o.r+.1))nodes.push(p);
+  const cost=nodes.map(()=>Infinity),parent=nodes.map(()=>-1),done=new Set();cost[0]=0;
+  for(let count=0;count<nodes.length;count++){
+   let current=-1;for(let i=0;i<nodes.length;i++)if(!done.has(i)&&(current<0||cost[i]<cost[current]))current=i;
+   if(current<0||!Number.isFinite(cost[current]))break;if(current===1){const path=[];let k=1;while(k!==0){path.push(nodes[k]);k=parent[k];if(k<0)return null;}return path.reverse();}
+   done.add(current);
+   for(let i=1;i<nodes.length;i++){if(done.has(i)||i===current)continue;const next=cost[current]+dist(nodes[current],nodes[i]);if(next<cost[i]&&this.clearPath(nodes[current],nodes[i],UNIT_RADIUS+.2,avoid)){cost[i]=next;parent[i]=current;}}
+  }
+  return null;
+ }
+ pathRemaining(s){if(!s.goal)return 0;const path=s.path.length?s.path:[s.goal];let total=dist(s,path[0]);for(let i=1;i<path.length;i++)total+=dist(path[i-1],path[i]);return total;}
+ passageRank(s){return (s.order?.priority||0)+(s.supply?.cargo?30:0);}
+ yieldTo(s,other){
+  if(WEAPONS[s.weapon].fixed||s.nav?.yield||this.time<(s.nav?.nextYield||0))return false;
+  const dx=other.vx||other.goal?.x-other.x||1,dy=other.vy||other.goal?.y-other.y||0,length=Math.hypot(dx,dy)||1,direction={x:dx/length,y:dy/length};
+  const choices=[];
+  for(const side of [1,-1])for(const d of [8,12])choices.push({x:s.x-direction.y*d*side,y:s.y+direction.x*d*side});
+  // In a single-file gap, back up to a place wide enough to let the other body pass.
+  for(const d of [10,18,28,40,56,72]){const p={x:s.x+direction.x*d,y:s.y+direction.y*d},left={x:p.x-direction.y*8,y:p.y+direction.x*8},right={x:p.x+direction.y*8,y:p.y-direction.x*8};if((this.insideRoom(left)&&!this.blocked(left.x,left.y,UNIT_RADIUS+.2))||(this.insideRoom(right)&&!this.blocked(right.x,right.y,UNIT_RADIUS+.2)))choices.push(p);}
+  for(const p of choices)if(this.destinationFree(s,p,'yield')&&this.clearPath(s,p)){s.nav.yield={point:p,for:other.id,direction,until:this.time+Math.max(8,dist(s,p)/2.5+4)};s.nav.nextYield=this.time+5;return true;}
+  return false;
+ }
+ recoverTraffic(s){
+  const nav=s.nav;if(!s.goal||!this.inTransit(s)||nav.yield||this.time-(nav.lastCheck||0)<.75)return;
+  const remaining=this.pathRemaining(s),progress=(nav.remaining??remaining)-remaining;
+  nav.stalled=progress>.3?0:(nav.stalled||0)+(this.time-(nav.lastCheck||this.time));nav.remaining=remaining;nav.lastCheck=this.time;
+  if(nav.stalled<1.5||this.time<(nav.nextRetry||0))return;
+  const next=s.path[0]||s.goal,dx=next.x-s.x,dy=next.y-s.y,length=dx*dx+dy*dy;
+  const nearby=this.living().filter(a=>{if(a===s||dist(a,s)>24)return false;const t=length?((a.x-s.x)*dx+(a.y-s.y)*dy)/length:0;return t>0&&t<=1&&Math.hypot(a.x-s.x-t*dx,a.y-s.y-t*dy)<7.6;}).sort((a,b)=>dist(a,s)-dist(b,s)).slice(0,4);
+  const avoid=nearby.map(a=>({x:a.x,y:a.y,r:7.6}));
+  let path=this.findPath(s,s.goal,avoid);
+  if(!path){const blocker=nearby.find(a=>!this.inTransit(a)&&dist(a,s.goal)>UNIT_SPACE);if(blocker)this.yieldTo(blocker,s);path=this.findPath(s,s.goal);}
+  if(path){s.path=path;nav.replans=(nav.replans||0)+1;nav.remaining=this.pathRemaining(s);}else{s.path=[];nav.waitUntil=this.time+.7;}
+  nav.stalled=0;nav.nextRetry=this.time+1.5;
+ }
+ nudge(s,dx,dy){
+  for(const [x,y] of [[s.x+dx,s.y+dy],[s.x+dx,s.y],[s.x,s.y+dy]])if(!this.blocked(x,y,UNIT_RADIUS+.2)&&this.insideRoom({x,y})){s.x=x;s.y=y;return true;}return false;
+ }
+ resolveBodies(dt){
+  const alive=this.living();
+  for(let pass=0;pass<4;pass++)for(let i=0;i<alive.length;i++)for(let j=i+1;j<alive.length;j++){
+   const a=alive[i],b=alive[j];let dx=a.x-b.x,dy=a.y-b.y,gap=Math.hypot(dx,dy);if(gap>=7.2)continue;
+   if(gap<.01){dx=Math.cos(a.id*2.399);dy=Math.sin(a.id*2.399);gap=1;}
+   const shift=Math.min(dt*3.5,(7.2-gap)*.52),ax=dx/gap*shift,ay=dy/gap*shift;
+   const movedA=!(WEAPONS[a.weapon].fixed&&a.mount)&&this.nudge(a,ax,ay),movedB=!(WEAPONS[b.weapon].fixed&&b.mount)&&this.nudge(b,-ax,-ay);
+   if(!movedA&&movedB)this.nudge(b,-ax,-ay);if(!movedB&&movedA)this.nudge(a,ax,ay);
+  }
  }
  move(s,dt,speed){
   if(WEAPONS[s.weapon].fixed&&s.mount){s.vx=s.vy=0;return;}
-  let p=s.path[0]||s.goal;
-  while(p&&s.path.length>1&&dist(s,p)<2.6&&this.clearPath(s,s.path[1])){s.path.shift();p=s.path[0];}
-  if(p&&s.path.length>1&&dist(s,p)<6){const next=s.path[1],blend=clamp((6-dist(s,p))/6)*.65,look={x:p.x+(next.x-p.x)*blend,y:p.y+(next.y-p.y)*blend};if(this.clearPath(s,look))p=look;}
-  const goalDistance=s.goal?dist(s,s.goal):0,dx=p?p.x-s.x:0,dy=p?p.y-s.y:0,d=Math.hypot(dx,dy),moving=goalDistance>1.1;
+  s.nav??={lastCheck:this.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};
+  if(this.time>=(s.nav.waitUntil||0))s.nav.waitFor=null;
+  this.recoverTraffic(s);
+  if(!s.path.length&&this.inTransit(s)&&this.time>=(s.nav.nextRetry||0)){const path=this.findPath(s,s.goal);if(path)s.path=path;else{s.nav.waitUntil=this.time+.6;s.nav.nextRetry=this.time+1;}}
+  if(s.nav.yield){const y=s.nav.yield,other=this.soldiers.find(a=>a.id===y.for),passed=other&&y.direction?(other.x-s.x)*y.direction.x+(other.y-s.y)*y.direction.y:0;if(!other||other.hp<=0||(passed>7&&dist(other,s)>12)||(!this.inTransit(other)&&dist(other,s)>16)||this.time>y.until){s.nav.yield=null;s.path=s.goal?(this.findPath(s,s.goal)||[]):[];}}
+  let p=s.nav.yield?.point||s.path[0]||s.goal;
+  while(!s.nav.yield&&p&&s.path.length>1&&dist(s,p)<2.6&&this.clearPath(s,s.path[1])){s.path.shift();p=s.path[0];}
+  if(!s.nav.yield&&p&&s.path.length>1&&dist(s,p)<6){const next=s.path[1],blend=clamp((6-dist(s,p))/6)*.65,look={x:p.x+(next.x-p.x)*blend,y:p.y+(next.y-p.y)*blend};if(this.clearPath(s,look))p=look;}
+  if(s.nav.yield)p=s.nav.yield.point;
+  const goalDistance=s.nav.yield?dist(s,s.nav.yield.point):s.goal?dist(s,s.goal):0,dx=p?p.x-s.x:0,dy=p?p.y-s.y:0,d=Math.hypot(dx,dy),moving=goalDistance>.4&&(!!s.nav.yield||s.path.length>0)&&this.time>=(s.nav.waitUntil||0);
   let vx=0,vy=0;
   if(moving&&d>.01){const v=speed*Math.min(1,goalDistance/3);vx=dx/d*v;vy=dy/d*v;}
   const dirX=d>.01?dx/d:Math.cos(s.moveHeading||0),dirY=d>.01?dy/d:Math.sin(s.moveHeading||0);
   for(const other of this.soldiers){
    if(other===s||other.hp<=0)continue;
-   let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);if(gap>=8)continue;
+   let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);if(gap>=12)continue;
    if(gap<.01){ox=s.id>other.id?1:-1;oy=0;gap=1;}
    const otherSpeed=Math.hypot(other.vx||0,other.vy||0);
-   if(!moving&&otherSpeed<.5&&gap>5.5)continue;
+   if(!moving&&otherSpeed<.5&&gap>7.2)continue;
    const future=Math.hypot(ox+((s.vx||0)-(other.vx||0))*.5,oy+((s.vy||0)-(other.vy||0))*.5);
-   if(moving&&future<6.1&&(-ox*dirX-oy*dirY)>0){
+   if(moving&&future<7.7&&(-ox*dirX-oy*dirY)>0){
+    const otherMoving=this.inTransit(other),rank=this.passageRank(s)-this.passageRank(other),loser=otherMoving&&(rank<0||(rank===0&&s.id>other.id));
+    if(!s.nav.yield&&loser&&other.nav?.waitFor!==s.id){s.nav.waitFor=other.id;s.nav.waitUntil=this.time+.35;this.yieldTo(s,other);vx*=.12;vy*=.12;}
     const cross=dirX*(-oy)-dirY*(-ox),sign=Math.abs(cross)>.8?(cross>0?-1:1):1;
-    const strength=clamp((8-gap)/3)*2.5;vx+=-dirY*sign*strength;vy+=dirX*sign*strength;
+    const strength=clamp((11-gap)/4)*2.5;vx+=-dirY*sign*strength;vy+=dirX*sign*strength;
    }
-   if(gap<5.5){const strength=(5.5-gap)*1.6;vx+=ox/gap*strength;vy+=oy/gap*strength;}
-   else if(!moving&&future<5.8&&otherSpeed>.8){vx+=ox/gap*.7;vy+=oy/gap*.7;}
+   if(gap<7.2){const strength=(7.2-gap)*1.6;vx+=ox/gap*strength;vy+=oy/gap*strength;}
+   else if(!moving&&future<7.5&&otherSpeed>.8){vx+=ox/gap*.7;vy+=oy/gap*.7;}
   }
   const wanted=Math.min(speed,Math.hypot(vx,vy)),current=Math.hypot(s.vx||0,s.vy||0);
   if(wanted>.04){
@@ -313,18 +383,18 @@ export class Game{
    s.vx=Math.cos(s.moveHeading)*nextSpeed;s.vy=Math.sin(s.moveHeading)*nextSpeed;
   }else {const next=Math.max(0,current-dt*7);s.vx=current?(s.vx||0)*next/current:0;s.vy=current?(s.vy||0)*next/current:0;}
   const oldX=s.x,oldY=s.y,nx=s.x+s.vx*dt,ny=s.y+s.vy*dt;
-  if(!this.blocked(nx,ny,1.8)){s.x=nx;s.y=ny;}
-  else if(!this.blocked(nx,s.y,1.8)){s.x=nx;s.vy=0;}
-  else if(!this.blocked(s.x,ny,1.8)){s.y=ny;s.vx=0;}
+  if(this.insideRoom({x:nx,y:ny})&&!this.blocked(nx,ny,UNIT_RADIUS+.2)){s.x=nx;s.y=ny;}
+  else if(this.insideRoom({x:nx,y:s.y})&&!this.blocked(nx,s.y,UNIT_RADIUS+.2)){s.x=nx;s.vy=0;}
+  else if(this.insideRoom({x:s.x,y:ny})&&!this.blocked(s.x,ny,UNIT_RADIUS+.2)){s.y=ny;s.vx=0;}
   else{s.vx=s.vy=0;}
   for(const other of this.soldiers){
-   if(other===s||other.hp<=0)continue;let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);if(gap>=5.5)continue;
+   if(other===s||other.hp<=0)continue;let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);if(gap>=7.2)continue;
    if(gap<.001){ox=s.id>other.id?1:-1;oy=0;gap=1;}
-   const correction=Math.min(dt*2.2,(5.5-gap)*.55),x=s.x+ox/gap*correction,y=s.y+oy/gap*correction;
-   if(!this.blocked(x,y,1.8)){s.x=x;s.y=y;}
+   const correction=Math.min(dt*2.2,(7.2-gap)*.55),x=s.x+ox/gap*correction,y=s.y+oy/gap*correction;
+   if(this.insideRoom({x,y})&&!this.blocked(x,y,UNIT_RADIUS+.2)){s.x=x;s.y=y;}
   }
   s.travel+=Math.hypot(s.x-oldX,s.y-oldY);
-  if(s.order&&s.goal&&dist(s,s.goal)<=2.4&&s.order.arrivedAt===null){s.order.arrivedAt=this.time;s.maneuverUntil=Math.max(s.maneuverUntil||0,this.time+3);}
+  if(s.order&&s.goal&&dist(s,s.goal)<=1.2&&s.order.arrivedAt===null){s.order.arrivedAt=this.time;s.maneuverUntil=Math.max(s.maneuverUntil||0,this.time+3);}
  }
  los(a,b){return !this.map.walls.some(r=>segmentHit(a,b,r))&&!this.map.crates.some(r=>segmentHit(a,b,r));}
  spawnEnemy(forceKind=null,forceSide=null){
@@ -359,15 +429,15 @@ export class Game{
   const req=s.supply;if(!req){s.task='guard';return;}
   const target=this.soldiers.find(x=>x.id===req.targetId);
   if(!target||target.hp<=0||WEAPONS[target.weapon].ammo!==req.type){
-   if(req.cargo>0){req.phase='return';this.setGoal(s,CENTER,{kind:'supply-return',priority:45,force:true});this.move(s,dt,3.4);if(dist(s,CENTER)>=4)return;this.stock[req.type]+=req.cargo;req.cargo=0;}
+   if(req.cargo>0){if(req.phase!=='return'){req.phase='return';this.releaseOrder(s);}this.setGoal(s,CENTER,{kind:'supply-return',priority:45});this.move(s,dt,3.4);if(!s.goal||dist(s,s.goal)>2.4||dist(s,CENTER)>18)return;this.stock[req.type]+=req.cargo;req.cargo=0;}
    if(target)target.supplyAssigned=null;s.supply=null;s.task='guard';this.releaseOrder(s);this.deploy();return;
   }
   if(req.phase==='pickup'){
    this.setGoal(s,CENTER,{kind:'supply-pickup',priority:40});this.move(s,dt,3.8);
-   if(dist(s,CENTER)<4){const qty=Math.min(req.qty,this.stock[req.type]);this.stock[req.type]-=qty;req.cargo=qty;req.phase='deliver';this.releaseOrder(s);}
+   if(s.goal&&dist(s,s.goal)<=2.4&&dist(s,CENTER)<18){const qty=Math.min(req.qty,this.stock[req.type]);this.stock[req.type]-=qty;req.cargo=qty;req.phase='deliver';this.releaseOrder(s);}
   }else{
    this.setGoal(s,target,{kind:'supply-deliver',priority:40,follow:true});this.move(s,dt,3.4);
-   if(dist(s,target)<6.5||s.id===target.id){
+   if((dist(s,target)<10.5&&this.los(s,target))||s.id===target.id){
     const accepted=Math.min(req.cargo,this.capacity(target)-target.mag-target.reserve);
     target.reserve+=accepted;this.stock[req.type]+=req.cargo-accepted;req.cargo=0;target.supplyAssigned=null;s.supply=null;s.task='guard';this.releaseOrder(s);this.supplyRuns++;
     this.effects.push({type:'supply',x:target.x,y:target.y,life:1,max:1,text:'+'+accepted});
@@ -443,7 +513,13 @@ export class Game{
   if(!best&&blocked){
    s.blockedSince??=this.time;
    if(this.time-s.blockedSince>.65&&s.task!=='supply'&&!WEAPONS[s.weapon].fixed&&!s.localOffset&&!this.inTransit(s)){
-    s.localOffset={amount:s.id%2?4.2:-4.2,until:this.time+8};this.coordinationAge=99;
+    const candidates=[];
+    for(const radius of [8.5,12,16,20])for(let i=0;i<24;i++){
+     const angle=i*Math.PI/12,p={x:s.x+Math.cos(angle)*radius,y:s.y+Math.sin(angle)*radius};
+     if(this.destinationFree(s,p)&&this.clearPath(s,p)&&this.los(p,blocked)&&!this.friendlyBlocker(p,blocked,alive))candidates.push(p);
+    }
+    candidates.sort((a,b)=>dist(s,a)-dist(s,b)||dist(a,CENTER)-dist(b,CENTER));
+    if(candidates.length){s.localOffset={amount:0,point:candidates[0],until:this.time+8};this.coordinationAge=99;}
    }
   }else s.blockedSince=null;
   return best;
@@ -464,6 +540,7 @@ export class Game{
  }
  step(dt){
   if(this.phase!=='combat')return;
+  if(this.trafficMigration){for(const s of this.living()){if(!this.insideRoom(s)||this.blocked(s.x,s.y,UNIT_RADIUS+.2)){const p=this.freePoint(s,s,'spawn');if(p){s.x=p.x;s.y=p.y;}}if(s.goal)s.path=this.findPath(s,s.goal)||[];}this.trafficMigration=false;this.coordinationAge=99;}
   this.time+=dt;this.waveTime+=dt;this.nodeTime+=dt;this.decisionAge+=dt;
   if(this.decisionAge>=1.2){this.decide();this.decisionAge=0;}
   this.spawnClock-=dt;
@@ -485,7 +562,7 @@ export class Game{
    const angle=Math.atan2(aim.y-s.y,aim.x-s.x)+scan,delta=angleDiff(angle,s.facing),desiredTurn=clamp(delta*7,best?-5.5:-3.4,best?5.5:3.4);
    s.turnVelocity=(s.turnVelocity||0)+(desiredTurn-(s.turnVelocity||0))*Math.min(1,dt*9);
    s.facing+=clamp(s.turnVelocity*dt,-Math.abs(delta),Math.abs(delta));
-   s.activity=s.task==='supply'?'haul':s.reload>0?'reload':Math.hypot(s.vx||0,s.vy||0)>.7?(s.retreating?'retreat':'move'):s.covering?'cover':best?'aim':'guard';
+   s.activity=s.nav?.yield?'yield':this.time<(s.nav?.waitUntil||0)?'wait':s.task==='supply'?'haul':s.reload>0?'reload':Math.hypot(s.vx||0,s.vy||0)>.7?(s.retreating?'retreat':'move'):s.covering?'cover':best?'aim':'guard';
    if(w.fixed&&!s.mount){if(s.goal&&dist(s,s.goal)>1.3)continue;s.setup=(s.setup??3)-dt;if(s.setup>0)continue;s.mount={x:s.x,y:s.y};}
    if(s.reload>0){s.reload-=dt;if(s.reload<=0){const n=Math.min(w.mag-s.mag,s.reserve);s.mag+=n;s.reserve-=n;}continue;}
    const buddy=alive.some(a=>a!==s&&a.side===s.side&&a.task!=='supply'&&a.reload<=0&&a.mag>WEAPONS[a.weapon].mag*.4);
@@ -498,6 +575,7 @@ export class Game{
    }
    else if(best&&dist(s,best)<3){this.damageEnemy(best,18,{pierce:0});s.cooldown=1;}
   }
+  this.resolveBodies(dt);
   for(const z of targets){
    if(z.hp<=0)continue;z.attack=Math.max(0,z.attack-dt);z.hit=Math.max(0,(z.hit||0)-dt);z.vx=z.vy=0;
    const gate=this.gates[z.side];
@@ -601,8 +679,8 @@ export class Game{
  serialize(){const obj={...this};delete obj.aiProvider;obj.rng={state:this.rng.state};obj.events=[];return JSON.stringify(obj);}
  static restore(raw,aiProvider=null){
   const v=typeof raw==='string'?JSON.parse(raw):raw,g=Object.create(Game.prototype);Object.assign(g,v);g.rng=new RNG(1);g.rng.state=v.rng.state;g.aiProvider=aiProvider;g.events=[];
-  g.projectiles??=[];g.lanes??=[];g.coordinationAge??=99;g.tacticChangedAt??=-99;g.tacticCandidate??=null;
-  for(const s of g.soldiers){s.vx??=0;s.vy??=0;s.facing??=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];s.recoil??=0;s.targetId??=null;s.activity??='guard';s.maneuverUntil??=0;s.assigned??=true;s.formationSlot??=null;s.formationSide??=null;s.order??=null;s.moveHeading??=null;s.turnVelocity??=0;}
+  g.projectiles??=[];g.lanes??=[];g.coordinationAge??=99;g.tacticChangedAt??=-99;g.tacticCandidate??=null;g.trafficMigration=!!g.trafficMigration||g.soldiers.some(s=>!s.nav);
+  for(const s of g.soldiers){s.vx??=0;s.vy??=0;s.facing??=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];s.recoil??=0;s.targetId??=null;s.activity??='guard';s.maneuverUntil??=0;s.assigned??=true;s.formationSlot??=null;s.formationSide??=null;s.order??=null;s.moveHeading??=null;s.turnVelocity??=0;s.guardPoint??=null;s.nav??={lastCheck:g.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};}
   return g;
  }
 }
