@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#151c19">
+  <meta name="description" content="围屋行动：小球守屋肉鸽。观看自动战斗，选择路线与军械升级，由内置轻量 AI 调整战术。">
+  <title>围屋行动 · AI 战术指挥</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23151c19'/%3E%3Cpath d='M15 25 32 12 49 25v24H15Z' stroke='%23d2e9a6' fill='none' stroke-width='4'/%3E%3Ccircle cx='32' cy='34' r='7' fill='%23d2e9a6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M6 14 18 5l12 9v17H6Z"/><path d="M13 31V20h10v11"/><circle cx="18" cy="13" r="2"/></svg><div><h1>围屋行动<span>01</span></h1><p>TACTICAL ROGUELIKE</p></div></div>
+      <div class="top-actions"><button class="model-badge" id="model-info" aria-label="查看 AI 模型信息"><i></i><span id="model-badge-text">AI 载入中</span></button><button class="icon-button" id="help" aria-label="玩法与军械资料">?</button></div>
+    </header>
+
+    <section class="mission" aria-label="行动路线">
+      <div class="mission-caption"><span id="mission-name">外围集结点</span><span id="mission-stage">4 个据点 · 一次行动</span></div>
+      <div class="route-track" id="route-track"></div>
+    </section>
+
+    <section class="hud" aria-label="战场状态">
+      <button id="team" class="stat"><span>存活队员</span><strong id="alive">12<small>/ 35</small></strong></button>
+      <div class="stat"><span>已清除</span><strong id="kills">000</strong></div>
+      <button id="ammo" class="stat"><span>共享库存 <b>↗</b></span><strong id="ammo-count">1,280<small>发</small></strong></button>
+      <div class="stat time-stat"><span>行动用时</span><strong id="timer">00:00</strong></div>
+    </section>
+
+    <section class="battlefield" aria-label="自动作战战场">
+      <div class="battle-caption"><span><i id="live-dot"></i><b id="battle-status">待命</b></span><span id="wave-label">小球模拟 / 俯视战场</span></div>
+      <canvas id="battle" width="800" height="800" aria-label="小球战场：绿色友军，紫色尸群；点击友军查看状态"></canvas>
+      <div class="map-legend"><span><i class="friend-dot"></i>队员</span><span><i class="enemy-dot"></i>尸群</span><span><i class="supply-dot"></i>搬弹</span></div>
+      <div class="map-controls"><button id="zoom-out" aria-label="缩小战场">−</button><span id="zoom-label">1×</span><button id="zoom-in" aria-label="放大战场">＋</button></div>
+      <div id="home-overlay" class="home-overlay">
+        <span class="eyebrow">OPERATION / 001</span>
+        <h2>守住此刻。<br><em>走到最后。</em></h2>
+        <p>12 人集结，穿越 4 个据点。<br>队伍自动作战，路线与成长由你决定。</p>
+        <button class="primary" id="start">开始行动 <span>↗</span></button>
+        <button class="resume" id="resume" hidden>继续上次行动 →</button>
+        <div class="home-facts"><span>10—15 分钟</span><span>阵亡保留</span><span>本地 AI 指挥</span></div>
+      </div>
+      <div id="pause-overlay" class="pause-overlay" hidden><span>Ⅱ</span><b>行动已暂停</b><button class="primary" id="resume-battle">继续战斗</button></div>
+      <div id="unit-detail" class="unit-detail" hidden></div>
+    </section>
+
+    <div class="battle-tools">
+      <div class="core"><span id="objective-label">据点核心</span><div class="meter"><i id="core-meter"></i></div><b id="core-value">100%</b></div>
+      <div class="playback"><button id="pause" aria-label="暂停战斗" disabled>Ⅱ</button><button data-speed="1" class="selected">1×</button><button data-speed="2">2×</button><button data-speed="4">4×</button></div>
+    </div>
+
+    <section class="ai-panel">
+      <button class="ai-icon" id="ai-details" aria-label="查看 AI 当前决策"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="m7 8 9 5 9-5M7 24l9-5 9 5M7 8v16M25 8v16M16 13v6"/><circle cx="7" cy="8" r="3"/><circle cx="25" cy="8" r="3"/><circle cx="7" cy="24" r="3"/><circle cx="25" cy="24" r="3"/><circle cx="16" cy="16" r="4"/></svg></button>
+      <div class="ai-copy"><div><span id="ai-heading">AI 战术网</span><strong id="ai-action">等待战场态势</strong></div><p id="ai-reason">24 项态势输入 · 8 种战术选择</p></div>
+      <button id="ai-toggle" class="switch" role="switch" aria-checked="true" aria-label="启用 AI 战术模型"><i></i></button>
+    </section>
+
+    <section id="decision-panel" class="decision-panel" aria-live="polite"></section>
+    <section class="field-notes"><div><span>FIELD NOTES</span><button id="history">战绩档案 ↗</button></div><p id="field-note">补给不是凭空到账。队员需要离开阵位，把弹药搬到防线。</p></section>
+    <footer><span>围屋行动 / 实验版 0.1</span><span>全新一局，完全从头开始</span></footer>
+  </main>
+
+  <dialog id="modal"><div class="modal-head"><span id="modal-title"></span><button id="modal-close" class="icon-button" aria-label="关闭弹窗">×</button></div><div id="modal-body"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
