@@ -1,0 +1,281 @@
+{
+  "name": "Weiwu Tiny Tactical Policy v1",
+  "architecture": [
+    24,
+    48,
+    32,
+    8
+  ],
+  "parameters": 3032,
+  "seed": 14621,
+  "trainingMethod": "Supervised synthetic utility-teacher imitation with NumPy Adam and cross entropy (92% hard label, 8% teacher soft label).",
+  "notClaimed": [
+    "reinforcement learning",
+    "training on human gameplay",
+    "measured game-win improvement",
+    "calibrated success probabilities"
+  ],
+  "trainingSamples": 48000,
+  "validationSamples": 10000,
+  "testSamples": 12000,
+  "splitSeeds": {
+    "train": 14621,
+    "validation": 14622,
+    "test": 14623
+  },
+  "epochs": 80,
+  "selectedEpoch": 75,
+  "batchSize": 512,
+  "validationAccuracy": 0.9843,
+  "heldout": {
+    "accuracy": 0.9839166666666667,
+    "majorityClassBaselineAccuracy": 0.24191666666666667,
+    "highTeacherMarginThreshold": 0.15,
+    "highTeacherMarginCount": 10221,
+    "highTeacherMarginAccuracy": 1.0,
+    "meanTeacherUtilityRegret": 0.00048200637684203684,
+    "maxTeacherUtilityRegret": 0.15121757984161377,
+    "perAction": {
+      "balanced": {
+        "count": 2903,
+        "accuracy": 0.9865656217705822
+      },
+      "reinforce_north": {
+        "count": 1107,
+        "accuracy": 0.976513098464318
+      },
+      "reinforce_east": {
+        "count": 1097,
+        "accuracy": 0.97538742023701
+      },
+      "reinforce_south": {
+        "count": 1172,
+        "accuracy": 0.9820819112627986
+      },
+      "reinforce_west": {
+        "count": 1104,
+        "accuracy": 0.9855072463768116
+      },
+      "resupply": {
+        "count": 1800,
+        "accuracy": 0.99
+      },
+      "fallback": {
+        "count": 1661,
+        "accuracy": 0.9819385912101144
+      },
+      "focus_heavy": {
+        "count": 1156,
+        "accuracy": 0.986159169550173
+      }
+    },
+    "confusionMatrix": [
+      [
+        2864,
+        5,
+        8,
+        6,
+        2,
+        10,
+        1,
+        7
+      ],
+      [
+        6,
+        1081,
+        3,
+        0,
+        0,
+        10,
+        2,
+        5
+      ],
+      [
+        1,
+        1,
+        1070,
+        2,
+        1,
+        3,
+        12,
+        7
+      ],
+      [
+        2,
+        2,
+        4,
+        1151,
+        4,
+        2,
+        5,
+        2
+      ],
+      [
+        5,
+        0,
+        1,
+        1,
+        1088,
+        4,
+        5,
+        0
+      ],
+      [
+        9,
+        0,
+        1,
+        5,
+        1,
+        1782,
+        0,
+        2
+      ],
+      [
+        3,
+        5,
+        4,
+        5,
+        8,
+        3,
+        1631,
+        2
+      ],
+      [
+        2,
+        4,
+        4,
+        0,
+        4,
+        1,
+        1,
+        1140
+      ]
+    ],
+    "confusionMatrixOrder": [
+      "balanced",
+      "reinforce_north",
+      "reinforce_east",
+      "reinforce_south",
+      "reinforce_west",
+      "resupply",
+      "fallback",
+      "focus_heavy"
+    ]
+  },
+  "contractScenariosPassed": 11,
+  "trainingSeconds": 4.92,
+  "featureNames": [
+    "pressure_north",
+    "pressure_east",
+    "pressure_south",
+    "pressure_west",
+    "gate_health_north",
+    "gate_health_east",
+    "gate_health_south",
+    "gate_health_west",
+    "ammo_readiness_north",
+    "ammo_readiness_east",
+    "ammo_readiness_south",
+    "ammo_readiness_west",
+    "shared_stock_fraction",
+    "empty_ammo_soldier_fraction",
+    "alive_count_div_35",
+    "average_health",
+    "armored_enemy_fraction",
+    "close_core_threat",
+    "wave_progress",
+    "hauling_soldier_fraction",
+    "casualty_fraction",
+    "core_health",
+    "boss_present",
+    "average_depot_distance_normalized"
+  ],
+  "actions": [
+    "balanced",
+    "reinforce_north",
+    "reinforce_east",
+    "reinforce_south",
+    "reinforce_west",
+    "resupply",
+    "fallback",
+    "focus_heavy"
+  ],
+  "validationHistory": [
+    {
+      "epoch": 1,
+      "validationAccuracy": 0.9279
+    },
+    {
+      "epoch": 5,
+      "validationAccuracy": 0.9662
+    },
+    {
+      "epoch": 10,
+      "validationAccuracy": 0.9714
+    },
+    {
+      "epoch": 15,
+      "validationAccuracy": 0.9712
+    },
+    {
+      "epoch": 20,
+      "validationAccuracy": 0.9794
+    },
+    {
+      "epoch": 25,
+      "validationAccuracy": 0.9779
+    },
+    {
+      "epoch": 30,
+      "validationAccuracy": 0.9812
+    },
+    {
+      "epoch": 35,
+      "validationAccuracy": 0.982
+    },
+    {
+      "epoch": 40,
+      "validationAccuracy": 0.9819
+    },
+    {
+      "epoch": 45,
+      "validationAccuracy": 0.9804
+    },
+    {
+      "epoch": 50,
+      "validationAccuracy": 0.9828
+    },
+    {
+      "epoch": 55,
+      "validationAccuracy": 0.9828
+    },
+    {
+      "epoch": 60,
+      "validationAccuracy": 0.9834
+    },
+    {
+      "epoch": 65,
+      "validationAccuracy": 0.9824
+    },
+    {
+      "epoch": 70,
+      "validationAccuracy": 0.9841
+    },
+    {
+      "epoch": 75,
+      "validationAccuracy": 0.9843
+    },
+    {
+      "epoch": 80,
+      "validationAccuracy": 0.9835
+    }
+  ],
+  "limitations": [
+    "Labels encode a hand-authored utility policy; teacher quality is unproven in the actual game.",
+    "Held-out data comes from the same synthetic generator, not real gameplay or a combat simulator.",
+    "No reinforcement learning, search, opponent model, memory, or online learning is used.",
+    "Close decision boundaries and out-of-distribution combat states may yield unsuitable actions.",
+    "Softmax confidence measures model preference and is not calibrated outcome probability.",
+    "Action effects and feature normalization must match the integration contract."
+  ]
+}
