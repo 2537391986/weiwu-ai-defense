@@ -1,4 +1,4 @@
-export const VERSION='0.1.1';
+export const VERSION='0.2.0';
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
 export const ACTION_LABELS=['均衡防守','北侧增援','东侧增援','南侧增援','西侧增援','优先补给','收缩防线','集火重型'];
@@ -36,6 +36,20 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const zeros=()=>({n556:0,n9:0,shell:0,n762:0,g40:0,n50:0});
 export const WORLD=400;
 const CENTER={x:200,y:205};
+const SPEED={m4:820,mp5:400,benelli:380,m249:820,m110:790,m203:75,m2:850};
+const angleDiff=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b));
+function circleEntry(a,b,c,r){
+ const dx=b.x-a.x,dy=b.y-a.y,ox=a.x-c.x,oy=a.y-c.y,A=dx*dx+dy*dy;
+ if(ox*ox+oy*oy<=r*r)return 0;
+ if(A<1e-10)return null;
+ const B=2*(ox*dx+oy*dy),D=B*B-4*A*(ox*ox+oy*oy-r*r);
+ if(D<0)return null;const t=(-B-Math.sqrt(D))/(2*A);return t>=0&&t<=1?t:null;
+}
+function rectEntry(a,b,r){
+ let lo=0,hi=1;
+ for(const k of ['x','y']){const d=b[k]-a[k],mn=r[k],mx=mn+r[k==='x'?'w':'h'];if(Math.abs(d)<1e-9){if(a[k]<mn||a[k]>mx)return null;}else{let l=(mn-a[k])/d,h=(mx-a[k])/d;if(l>h)[l,h]=[h,l];lo=Math.max(lo,l);hi=Math.min(hi,h);if(lo>hi)return null;}}
+ return lo>=0&&lo<=1?lo:null;
+}
 function segmentHit(a,b,r){
  let lo=0,hi=1;
  for(const k of ['x','y']){
@@ -56,11 +70,11 @@ export class Game{
   this.phase='home';this.time=0;this.nodeIndex=-1;this.wave=0;this.waveTime=0;this.nodeTime=0;this.id=1;
   this.stock={n556:2400,n9:0,shell:120,n762:0,g40:0,n50:0};
   this.acquired={...this.stock};this.fired=zeros();this.lost=zeros();
-  this.soldiers=[];this.enemies=[];this.effects=[];this.logs=[];this.events=[];this.choices=[];
+  this.soldiers=[];this.enemies=[];this.projectiles=[];this.effects=[];this.logs=[];this.events=[];this.choices=[];
   this.kills=0;this.spawned=0;this.dead=0;this.rewardCount=0;this.routeHistory=[];
   this.mod={reload:1,carry:1,armor:0,doors:1};this.tactic='balanced';this.decisionAge=99;this.decisions=0;this.neuralDecisions=0;
   this.aiState={action:'balanced',confidence:0,source:aiEnabled?'loading':'rules',reason:'等待战术态势'};
-  this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;
+  this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;this.coordinationAge=99;this.lanes=[];
   this.map=this.makeMap('warehouse');this.core={...CENTER,hp:1500,max:1500};this.setupGates();
   for(let i=0;i<12;i++)this.addSoldier(i<8?'m4':i<10?'benelli':'m249',false);
   this.deploy();this.log('全队集结','12名队员已就位。选择路线后自动部署。');
@@ -73,7 +87,7 @@ export class Game{
   if(this.living().length>=35)return null;
   const w=WEAPONS[weapon];
   if(giveAmmo)this.gainAmmo(w.ammo,weapon==='m4'?90:w.carry);
-  const s={id:this.id++,x:200,y:205,hp:100,maxHP:100,weapon,mag:0,reserve:0,cooldown:this.rng.next(),reload:0,burst:0,side:0,goal:null,path:[],task:'guard',supply:null,supplyAssigned:null,travel:0,kills:0,shots:0,armor:0};
+  const s={id:this.id++,x:200,y:205,hp:100,maxHP:100,weapon,mag:0,reserve:0,cooldown:this.rng.next(),reload:0,burst:0,side:0,goal:null,path:[],task:'guard',supply:null,supplyAssigned:null,travel:0,kills:0,shots:0,armor:0,vx:0,vy:0,facing:0,recoil:0,targetId:null,activity:'guard',maneuverUntil:0};
   this.soldiers.push(s);
   this.takeAmmo(s,w.carry);
   return s;
@@ -109,38 +123,72 @@ export class Game{
  enterNode(choice){
   if(this.phase!=='route')return false;
   this.nodeIndex++;this.node={...choice};this.routeHistory.push({...choice,stage:this.nodeIndex});
-  this.wave=0;this.nodeTime=0;this.enemies=[];this.effects=[];
+  this.wave=0;this.nodeTime=0;this.enemies=[];this.projectiles=[];this.effects=[];this.lanes=[];
   this.map=this.makeMap(choice.template);this.setupGates();this.core={...CENTER,hp:1500,max:1500};
-  for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.mount=null;s.setup=3;}
+  for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.mount=null;s.setup=3;s.vx=s.vy=0;s.targetId=null;s.localOffset=null;}
   this.deploy();this.beginWave();
   this.log('据点 '+(this.nodeIndex+1),choice.name+' · '+(choice.mode==='hold'?'限时坚守':'清剿')+'。幸存者恢复生命，弹药按原库存保留。');
   return true;
  }
  beginWave(){
-  this.wave++;this.waveTime=0;this.phase='combat';this.spawnClock=.3;this.remaining=80+this.nodeIndex*30+(this.wave-1)*20+(this.node.danger?16:0);
+  this.wave++;this.waveTime=0;this.phase='combat';this.projectiles=[];this.spawnClock=.3;this.remaining=80+this.nodeIndex*30+(this.wave-1)*20+(this.node.danger?16:0);
   this.spawnInterval=(50+this.nodeIndex*13+(this.wave-1)*12)/Math.ceil(this.remaining/12);
   this.holdDuration=70+this.nodeIndex*4;this.waveSpawned=0;this.bossSpawned=false;
   this.decisionAge=99;this.log('第 '+this.wave+' / 2 波',this.node.mode==='hold'?'守住核心至倒计时结束。':'清除本波全部敌人。');
  }
  deploy(){
-  const alive=this.living(),pressure=this.sidePressure();
-  let priority=-1;if(this.tactic.startsWith('reinforce_'))priority=ACTIONS.indexOf(this.tactic)-1;
-  const order=[0,1,2,3];
-  if(priority>=0){order.splice(order.indexOf(priority),1);order.unshift(priority,priority);}
-  let i=0;
-  for(const s of alive){
-   if(s.task==='supply')continue;
-   if(WEAPONS[s.weapon].fixed&&s.mount){s.goal={...s.mount};s.path=[];continue;}
-   const side=order[i%order.length];s.side=side;
-   const slot=Math.floor(i/order.length),offset=(slot%5-2)*4.1;
-   const g=this.gates[side];let p;
-   const depth=this.tactic==='fallback'?39:WEAPONS[s.weapon].fixed?12:9+(slot%2)*5;
-   if(side===0)p={x:g.x+offset,y:g.y+depth};
-   if(side===1)p={x:g.x-depth,y:g.y+offset};
-   if(side===2)p={x:g.x+offset,y:g.y-depth};
-   if(side===3)p={x:g.x+depth,y:g.y+offset};
-   if(this.phase==='home'){s.x=p.x;s.y=p.y;}
-   this.setGoal(s,p);i++;
+  const alive=this.living(),counts=[0,0,0,0];
+  for(const s of alive)if(s.assigned)counts[s.side]++;
+  for(const s of alive)if(!s.assigned){s.side=counts.indexOf(Math.min(...counts));counts[s.side]++;s.assigned=true;s.facing=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];}
+  this.coordinate(true);
+  if(this.phase==='home')for(const s of alive)if(s.goal){s.x=s.goal.x;s.y=s.goal.y;s.path=[];}
+ }
+ formationPoint(side,depth,offset){
+  const g=this.gates[side];
+  return side===0?{x:g.x+offset,y:g.y+depth}:side===1?{x:g.x-depth,y:g.y+offset}:side===2?{x:g.x+offset,y:g.y-depth}:{x:g.x+depth,y:g.y+offset};
+ }
+ coordinate(force=false){
+  const alive=this.living(),guards=alive.filter(s=>s.task!=='supply'),pressure=this.sidePressure();
+  const priority=this.tactic.startsWith('reinforce_')?ACTIONS.indexOf(this.tactic)-1:-1;
+  const weights=pressure.map((p,i)=>1+Math.min(p/10,.8)+(i===priority?2:0));
+  const desired=[0,0,0,0];
+  for(let i=0;i<guards.length;i++){let side=0;for(let j=1;j<4;j++)if((desired[j]+.8)/weights[j]<(desired[side]+.8)/weights[side])side=j;desired[side]++;}
+  const counts=[0,0,0,0];for(const s of guards)counts[s.side]++;
+  // Transfer the nearest available soldiers, never reshuffle the entire roster.
+  for(let n=0;n<(force?2:1);n++){
+   let side=-1;for(let i=0;i<4;i++)if(desired[i]>counts[i]&&(side<0||desired[i]-counts[i]>desired[side]-counts[side]))side=i;
+   if(side<0)break;
+   const candidates=guards.filter(s=>counts[s.side]>desired[s.side]&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&this.time>=(s.maneuverUntil||0));
+   candidates.sort((a,b)=>dist(a,this.gates[side])-dist(b,this.gates[side])||(a.id-b.id));
+   const unit=candidates[0];if(!unit)break;counts[unit.side]--;counts[side]++;unit.side=side;unit.localOffset=null;unit.maneuverUntil=this.time+7;
+  }
+  for(let side=0;side<4;side++){
+   const group=guards.filter(s=>s.side===side),gate=this.gates[side];
+   const lane=this.lanes[side]||(this.lanes[side]={depth:0,previous:0,since:this.time,holdUntil:0});
+   const intruders=this.enemies.filter(z=>z.hp>0&&z.side===side&&z.entered&&dist(z,CENTER)<68).length;
+   let depth=0;
+   if((this.tactic==='fallback'&&(pressure[side]>1||intruders))||intruders>=2)depth=intruders>=4?25:13;
+   else if(gate.hp/gate.max<.22&&pressure[side]>5)depth=10;
+   if(depth<lane.depth&&this.time<lane.holdUntil)depth=lane.depth;
+   if(depth!==lane.depth){lane.previous=lane.depth;lane.depth=depth;lane.since=this.time;lane.holdUntil=this.time+6;}
+   const reloading=group.filter(s=>s.reload>0),ready=group.filter(s=>s.reload<=0&&s.mag>0);
+   const cover=reloading.length?ready.slice().sort((a,b)=>dist(a,gate)-dist(b,gate)||a.id-b.id).slice(0,reloading.length):[];
+   const ordered=group.slice().sort((a,b)=>(a.weapon==='benelli'?-2:WEAPONS[a.weapon].fixed?2:0)-(b.weapon==='benelli'?-2:WEAPONS[b.weapon].fixed?2:0)||a.id-b.id);
+   for(let i=0;i<ordered.length;i++){
+    const s=ordered[i],w=WEAPONS[s.weapon];
+    if(w.fixed&&s.mount){this.setGoal(s,s.mount);continue;}
+    // Alternate the first and second element so one can cover the other's withdrawal.
+    const delay=(i%2)*1.2,retreat=this.time-lane.since<delay?lane.previous:lane.depth;
+    let depthBase=w.fixed?14:s.weapon==='benelli'?8:s.weapon==='m249'?17:s.weapon==='m110'||s.weapon==='m203'?21:11;
+    depthBase+=Math.floor(i/3)*7+retreat+(s.reload>0?6:0)-(cover.includes(s)?3:0);
+    let offset=(i%3-1)*6.2;
+    if(s.localOffset&&(s.localOffset.until>this.time||pressure[side]>0))offset+=s.localOffset.amount;
+    else s.localOffset=null;
+    let point=this.formationPoint(side,depthBase,offset);
+    if(this.blocked(point.x,point.y,2))point=this.formationPoint(side,depthBase+9,offset);
+    s.covering=cover.includes(s);s.retreating=retreat>0;s.holdPoint={...point};
+    this.setGoal(s,point);
+   }
   }
  }
  sidePressure(){
@@ -170,7 +218,7 @@ export class Game{
   const chosenSide=ACTIONS.indexOf(d.action)-1;
   const reason=d.action==='resupply'?'缺弹比例 '+Math.round(f[13]*100)+'%，调派士兵优先运送兼容弹药。':d.action==='fallback'?'核心附近出现威胁，保留补给通道并收缩阵位。':d.action==='focus_heavy'?'识别到护具或母体目标，调整集火优先级。':d.action==='balanced'?'保持四向警戒，按需安排搬运。':SIDES[chosenSide]+'需要增援，调整队员站位与射击侧重。';
   this.aiState={action:d.action,confidence:d.confidence,source,reason,features:f};
-  if(this.lastAiAction!==d.action){this.log(source==='neural'?'AI 战术更新':'常规策略',ACTION_LABELS[ACTIONS.indexOf(d.action)]+' · '+reason);this.lastAiAction=d.action;this.deploy();}
+  if(this.lastAiAction!==d.action){this.log('防线调整',ACTION_LABELS[ACTIONS.indexOf(d.action)]+' · '+reason);this.lastAiAction=d.action;this.deploy();}
  }
  setAI(on){this.aiEnabled=!!on;this.decisionAge=99;this.lastAiAction='';}
  blocked(x,y,r=1.1){
@@ -202,12 +250,34 @@ export class Game{
   return path.reverse().slice(1);
  }
  move(s,dt,speed){
-  const p=s.path[0]||s.goal;if(!p)return;
-  const dx=p.x-s.x,dy=p.y-s.y,d=Math.hypot(dx,dy);if(d<1.2){if(s.path.length)s.path.shift();return;}
-  const step=Math.min(d,speed*dt),nx=s.x+dx/d*step,ny=s.y+dy/d*step;
-  if(!this.blocked(nx,ny)){s.x=nx;s.y=ny;s.travel+=step;}
-  else if(!this.blocked(nx,s.y)){s.travel+=Math.abs(nx-s.x);s.x=nx;}
-  else if(!this.blocked(s.x,ny)){s.travel+=Math.abs(ny-s.y);s.y=ny;}
+  if(WEAPONS[s.weapon].fixed&&s.mount){s.vx=s.vy=0;return;}
+  let p=s.path[0]||s.goal;
+  if(p&&dist(s,p)<1.1&&s.path.length){s.path.shift();p=s.path[0]||s.goal;}
+  let dx=p?p.x-s.x:0,dy=p?p.y-s.y:0,d=Math.hypot(dx,dy),vx=0,vy=0;
+  if(d>.7){const v=speed*Math.min(1,d/2);vx=dx/d*v;vy=dy/d*v;}
+  for(const other of this.soldiers){
+   if(other===s||other.hp<=0)continue;
+   let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);
+   if(gap>=6.6)continue;
+   if(gap<.01){const angle=(s.id>other.id?1:-1)*Math.PI/3;ox=Math.cos(angle);oy=Math.sin(angle);gap=1;}
+   const strength=(6.6-gap)/6.6*(other.task==='supply'?6.5:4.8);
+   vx+=ox/gap*strength;vy+=oy/gap*strength;
+  }
+  const length=Math.hypot(vx,vy);if(length>speed){vx*=speed/length;vy*=speed/length;}
+  const blend=Math.min(1,dt*8);s.vx=(s.vx||0)+(vx-(s.vx||0))*blend;s.vy=(s.vy||0)+(vy-(s.vy||0))*blend;
+  const oldX=s.x,oldY=s.y,nx=s.x+s.vx*dt,ny=s.y+s.vy*dt;
+  if(!this.blocked(nx,ny,1.8)){s.x=nx;s.y=ny;}
+  else if(!this.blocked(nx,s.y,1.8)){s.x=nx;s.vy=0;}
+  else if(!this.blocked(s.x,ny,1.8)){s.y=ny;s.vx=0;}
+  else{s.vx=s.vy=0;}
+  // Resolve residual overlap after steering, including soldiers sharing a waypoint.
+  for(const other of this.soldiers){
+   if(other===s||other.hp<=0)continue;let ox=s.x-other.x,oy=s.y-other.y,gap=Math.hypot(ox,oy);if(gap>=5.6)continue;
+   if(gap<.001){ox=s.id>other.id?1:-1;oy=0;gap=1;}
+   const correction=Math.min(.35,(5.6-gap)*.55),x=s.x+ox/gap*correction,y=s.y+oy/gap*correction;
+   if(!this.blocked(x,y,1.8)){s.x=x;s.y=y;}
+  }
+  s.travel+=Math.hypot(s.x-oldX,s.y-oldY);
  }
  los(a,b){return !this.map.walls.some(r=>segmentHit(a,b,r))&&!this.map.crates.some(r=>segmentHit(a,b,r));}
  spawnEnemy(forceKind=null,forceSide=null){
@@ -250,7 +320,7 @@ export class Game{
    if(dist(s,CENTER)<4){const qty=Math.min(req.qty,this.stock[req.type]);this.stock[req.type]-=qty;req.cargo=qty;req.phase='deliver';s.goal=null;}
   }else{
    this.setGoal(s,target);this.move(s,dt,3.4);
-   if(dist(s,target)<4||s.id===target.id){
+   if(dist(s,target)<6.5||s.id===target.id){
     const accepted=Math.min(req.cargo,this.capacity(target)-target.mag-target.reserve);
     target.reserve+=accepted;this.stock[req.type]+=req.cargo-accepted;req.cargo=0;target.supplyAssigned=null;s.supply=null;s.task='guard';s.goal=null;this.supplyRuns++;
     this.effects.push({type:'supply',x:target.x,y:target.y,life:1,max:1,text:'+'+accepted});
@@ -267,55 +337,114 @@ export class Game{
  }
  damageEnemy(z,amount,weapon){
   if(z.hp<=0)return;
-  z.hp-=amount*(1-z.armor*(1-(weapon.pierce||0)));
+  z.hp-=amount*(1-z.armor*(1-(weapon.pierce||0)));z.hit=.14;
   if(z.hp<=0){this.kills++;z.hp=0;this.effects.push({type:'death',x:z.x,y:z.y,life:.35,max:.35,color:z.kind==='mother'?'#e77f9f':'#a486da'});}
  }
  fire(s,z){
   const w=WEAPONS[s.weapon];s.mag--;s.shots++;this.fired[w.ammo]++;s.burst++;
   let chance=clamp(w.accuracy-dist(s,z)/(w.range*2.4),.2,.96);
-  if(s.task==='supply')chance*=.65;
+  if(s.task==='supply')chance*=.65;else if(Math.hypot(s.vx||0,s.vy||0)>1.5)chance*=.85;
   const hit=this.rng.next()<chance;
-  const end={x:z.x+(hit?0:(this.rng.next()-.5)*12),y:z.y+(hit?0:(this.rng.next()-.5)*12)};
-  this.effects.push({type:'shot',x:s.x,y:s.y,tx:end.x,ty:end.y,life:.12,max:.12,color:w.color});
-  if(hit){
-   if(w.blast){for(const e of this.enemies)if(e.hp>0&&dist(e,z)<w.blast)this.damageEnemy(e,w.damage*(1-dist(e,z)/(w.blast*1.4)),w);this.effects.push({type:'blast',x:z.x,y:z.y,r:w.blast,life:.5,max:.5});}
-   else {const before=z.hp;this.damageEnemy(z,w.damage,w);if(before>0&&z.hp<=0)s.kills++;}
+  const flight=dist(s,z)/SPEED[s.weapon],end={x:z.x+(z.vx||0)*flight+(hit?0:(this.rng.next()<.5?-1:1)*(5+this.rng.next()*7)),y:z.y+(z.vy||0)*flight+(hit?0:(this.rng.next()-.5)*14)};
+  const angle=Math.atan2(end.y-s.y,end.x-s.x),distance=dist(s,end),pellets=s.weapon==='benelli'?7:1;
+  s.facing=angle;s.recoil=1;s.targetId=z.id;s.activity='fire';
+  this.effects.push({type:'muzzle',x:s.x+Math.cos(angle)*5.2,y:s.y+Math.sin(angle)*5.2,angle,life:.055,max:.055});
+  for(let i=0;i<pellets;i++){
+   const a=angle+(pellets>1?(i-3)*.019+(this.rng.next()-.5)*.012:0),speed=SPEED[s.weapon],x=s.x+Math.cos(a)*4.3,y=s.y+Math.sin(a)*4.3;
+   this.projectiles.push({x,y,px:x,py:y,vx:Math.cos(a)*speed,vy:Math.sin(a)*speed,speed,travel:0,length:distance,remaining:Math.min(w.range,distance+(w.blast?0:10))-4.3,weapon:s.weapon,sourceId:s.id,targetId:z.id,damage:w.damage/pellets,expected:w.damage/pellets*(hit?.9:.15),grenade:!!w.blast});
   }
   s.cooldown=60/w.rpm;
   if(s.burst>=w.burst){s.burst=0;s.cooldown+=w.pause;}
+  return w.damage*(hit?.9:.15)*(1-z.armor*(1-(w.pierce||0)));
+ }
+ impact(p,enemy){
+  const w=WEAPONS[p.weapon],shooter=this.soldiers.find(s=>s.id===p.sourceId);
+  const hit=z=>{const before=z.hp;this.damageEnemy(z,p.damage,w);if(before>0&&z.hp<=0&&shooter)shooter.kills++;};
+  if(p.grenade){for(const z of this.enemies)if(z.hp>0&&dist(z,p)<w.blast){const damage=p.damage;p.damage=damage*(1-dist(z,p)/(w.blast*1.4));hit(z);p.damage=damage;}this.effects.push({type:'blast',x:p.x,y:p.y,r:w.blast,life:.42,max:.42});}
+  else {if(enemy)hit(enemy);this.effects.push({type:'impact',x:p.x,y:p.y,life:.13,max:.13,color:enemy?'#d2a2ef':'#a5bdd4'});}
+ }
+ updateProjectiles(dt){
+  const keep=[];
+  for(const p of this.projectiles){
+   p.px=p.x;p.py=p.y;
+   const step=Math.max(0,Math.min(p.remaining,p.speed*dt)),end={x:p.x+p.vx/p.speed*step,y:p.y+p.vy/p.speed*step};
+   let first=1,collision=false,enemy=null;
+   for(const wall of [...this.map.walls,...this.map.crates]){const t=rectEntry(p,end,wall);if(t!==null&&t<=first){first=t;collision=true;enemy=null;}}
+   if(!p.grenade)for(const z of this.enemies){if(z.hp<=0)continue;const r=z.kind==='mother'?7:z.kind==='heavy'?3.6:2.8,t=circleEntry(p,end,z,r);if(t!==null&&t<first){first=t;collision=true;enemy=z;}}
+   p.x+=(end.x-p.x)*first;p.y+=(end.y-p.y)*first;p.travel+=step*first;p.remaining-=step*first;
+   if(collision||p.remaining<.01){this.impact(p,enemy);if(!p.grenade)this.effects.push({...p,type:'tracer',life:2/30,max:2/30});}else keep.push(p);
+  }
+  this.projectiles=keep;
+ }
+ friendlyBlocker(s,z,alive){
+  const dx=z.x-s.x,dy=z.y-s.y,length=dx*dx+dy*dy;
+  if(length<1)return null;
+  return alive.find(a=>{if(a===s||a.hp<=0)return false;const t=((a.x-s.x)*dx+(a.y-s.y)*dy)/length;return t>.035&&t<.94&&Math.hypot(a.x-s.x-t*dx,a.y-s.y-t*dy)<2.7;})||null;
+ }
+ chooseTarget(s,targets,alive,committed){
+  const w=WEAPONS[s.weapon];let best=null,score=Infinity,blocked=null;
+  for(const z of targets){
+   if(z.hp<=0)continue;
+   const d=dist(s,z);if(d>Math.min(w.range,ENGAGEMENT[s.weapon])||(w.minRange&&d<w.minRange)||!this.los(s,z))continue;
+   if(w.blast&&alive.some(a=>dist(a,z)<w.blast+2))continue;
+   if((committed.get(z.id)||0)>=z.hp*1.05&&!w.blast)continue;
+   if(this.friendlyBlocker(s,z,alive)){if(!blocked||dist(s,z)<dist(s,blocked))blocked=z;continue;}
+   let v=d+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0);
+   if(z.side!==s.side&&!z.inside)v+=45;
+   if(v<score){best=z;score=v;}
+  }
+  if(!best&&blocked&&s.task!=='supply'&&!WEAPONS[s.weapon].fixed&&!s.localOffset){s.localOffset={amount:s.id%2?4.2:-4.2,until:this.time+2.5};this.coordinationAge=99;}
+  return best;
+ }
+ separateEnemies(dt){
+  const buckets=new Map(),cell=10;
+  for(const z of this.enemies){if(z.hp<=0)continue;const key=Math.floor(z.x/cell)+','+Math.floor(z.y/cell);if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(z);}
+  for(const z of this.enemies){
+   if(z.hp<=0)continue;let pushX=0,pushY=0;const bx=Math.floor(z.x/cell),by=Math.floor(z.y/cell);
+   for(let x=bx-1;x<=bx+1;x++)for(let y=by-1;y<=by+1;y++)for(const other of buckets.get(x+','+y)||[]){
+    if(other===z)continue;let dx=z.x-other.x,dy=z.y-other.y,d=Math.hypot(dx,dy),spacing=(z.kind==='mother'||other.kind==='mother')?8:4.7;
+    if(d>=spacing)continue;if(d<.01){const a=(z.id*2.399963+other.id)*Math.sign(z.id-other.id);dx=Math.cos(a);dy=Math.sin(a);d=1;}
+    const strength=(spacing-d)*1.5;pushX+=dx/d*strength;pushY+=dy/d*strength;
+   }
+   const length=Math.hypot(pushX,pushY),scale=length>3?3/length:1,nx=z.x+pushX*scale*dt,ny=z.y+pushY*scale*dt;
+   if(!this.blocked(nx,ny,.7)){z.x=nx;z.y=ny;}
+  }
  }
  step(dt){
   if(this.phase!=='combat')return;
   this.time+=dt;this.waveTime+=dt;this.nodeTime+=dt;this.decisionAge+=dt;
-  if(this.decisionAge>=4){this.decide();this.decisionAge=0;}
+  if(this.decisionAge>=1.2){this.decide();this.decisionAge=0;}
   this.spawnClock-=dt;
   if(this.remaining>0&&this.spawnClock<=0){const count=Math.min(12,this.remaining,240-this.enemies.filter(z=>z.hp>0).length),side=this.rng.int(4);for(let i=0;i<count;i++){this.spawnEnemy(null,this.rng.next()<.8?side:this.rng.int(4));this.remaining--;}this.spawnClock=this.spawnInterval*(.94+this.rng.next()*.12);}
   if(this.nodeIndex===3&&this.wave===2&&!this.bossSpawned&&this.waveTime>18){this.spawnEnemy('mother',this.rng.int(4));this.bossSpawned=true;this.log('母体出现','集中重火力，注意侧门和弹药储备。');}
   if(!this.supplyClock||this.time>=this.supplyClock){this.assignSupplies();this.supplyClock=this.time+.6;}
   const alive=this.living(),targets=this.enemies.filter(z=>z.hp>0);
+  this.coordinationAge+=dt;if(this.coordinationAge>=.4){this.coordinate();this.coordinationAge=0;}
+  this.updateProjectiles(dt);
+  const committed=new Map();for(const p of this.projectiles){const w=WEAPONS[p.weapon],z=targets.find(z=>z.id===p.targetId);committed.set(p.targetId,(committed.get(p.targetId)||0)+p.expected*(1-(z?.armor||0)*(1-(w.pierce||0))));}
   for(const s of alive){
-   s.cooldown=Math.max(0,s.cooldown-dt);
+   s.cooldown=Math.max(0,s.cooldown-dt);s.recoil=Math.max(0,(s.recoil||0)-dt*8);s.hit=Math.max(0,(s.hit||0)-dt);s.scanClock=(s.scanClock||0)-dt;
    if(s.task==='supply')this.updateSupply(s,dt);else this.move(s,dt,WEAPONS[s.weapon].fixed?1.5:3.0);
    const w=WEAPONS[s.weapon];
+   let best=targets.find(z=>z.id===s.targetId&&z.hp>0);
+   if(s.scanClock<=0||!best){best=this.chooseTarget(s,targets,alive,committed);s.targetId=best?.id??null;s.scanClock=.17+(s.id%5)*.035;}
+   const aim=best||((Math.hypot(s.vx||0,s.vy||0)>.7)?{x:s.x+s.vx*5,y:s.y+s.vy*5}:this.gates[s.side]);
+   const angle=Math.atan2(aim.y-s.y,aim.x-s.x);s.facing+=clamp(angleDiff(angle,s.facing),-dt*9,dt*9);
+   s.activity=s.task==='supply'?'haul':s.reload>0?'reload':Math.hypot(s.vx||0,s.vy||0)>.7?(s.retreating?'retreat':'move'):s.covering?'cover':best?'aim':'guard';
    if(w.fixed&&!s.mount){if(s.goal&&dist(s,s.goal)>1.3)continue;s.setup=(s.setup??3)-dt;if(s.setup>0)continue;s.mount={x:s.x,y:s.y};}
    if(s.reload>0){s.reload-=dt;if(s.reload<=0){const n=Math.min(w.mag-s.mag,s.reserve);s.mag+=n;s.reserve-=n;}continue;}
-   if(s.mag===0&&s.reserve>0){s.reload=w.reload/this.mod.reload;continue;}
+   const buddy=alive.some(a=>a!==s&&a.side===s.side&&a.task!=='supply'&&a.reload<=0&&a.mag>WEAPONS[a.weapon].mag*.4);
+   const someoneReloading=alive.some(a=>a!==s&&a.side===s.side&&a.reload>0);
+   if(s.reserve>0&&(s.mag===0||(w.mag>7&&s.mag<w.mag*.18&&s.burst===0&&buddy&&!someoneReloading))){s.reload=w.reload/this.mod.reload;s.activity='reload';this.coordinationAge=99;continue;}
    if(s.cooldown>0)continue;
-   let best=null,score=Infinity;
-   for(const z of targets){
-    if(z.hp<=0)continue;
-    // Fire discipline conserves stock at long range. This is a tactical choice, not a claim about weapon maximum range.
-    const d=dist(s,z);if(d>Math.min(w.range,ENGAGEMENT[s.weapon])||(w.minRange&&d<w.minRange)||!this.los(s,z))continue;
-    if(w.blast&&alive.some(a=>dist(a,z)<w.blast+2))continue;
-    let v=d+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0);
-    if(z.side!==s.side&&!z.inside)v+=45;
-    if(v<score){best=z;score=v;}
+   if(best&&(committed.get(best.id)||0)>=best.hp*1.05)best=this.chooseTarget(s,targets,alive,committed);
+   if(best&&s.mag>0&&Math.abs(angleDiff(Math.atan2(best.y-s.y,best.x-s.x),s.facing))<.3&&this.los(s,best)&&!this.friendlyBlocker(s,best,alive)){
+    const damage=this.fire(s,best);committed.set(best.id,(committed.get(best.id)||0)+damage);
    }
-   if(best&&s.mag>0)this.fire(s,best);
    else if(best&&dist(s,best)<3){this.damageEnemy(best,18,{pierce:0});s.cooldown=1;}
   }
   for(const z of targets){
-   if(z.hp<=0)continue;z.attack=Math.max(0,z.attack-dt);
+   if(z.hp<=0)continue;z.attack=Math.max(0,z.attack-dt);z.hit=Math.max(0,(z.hit||0)-dt);z.vx=z.vy=0;
    const gate=this.gates[z.side];
    let goal=gate;
    if(!z.entered){
@@ -333,17 +462,19 @@ export class Game{
     if(dist(z,goal)<3.2){
      if(z.attack<=0){const damage=z.kind==='mother'?35:z.kind==='heavy'?22:11;
       if(goal===CENTER)this.core.hp=Math.max(0,this.core.hp-damage);
-      else {goal.hp=Math.max(0,goal.hp-damage*(1-this.mod.armor));if(goal.hp===0)this.killSoldier(goal);}
+      else {goal.hp=Math.max(0,goal.hp-damage*(1-this.mod.armor));goal.hit=.18;if(goal.hp===0)this.killSoldier(goal);}
       z.attack=.85;
      }continue;
     }
    }
-   const d=dist(z,goal),step=Math.min(d,z.speed*dt);
+   const oldX=z.x,oldY=z.y,d=dist(z,goal),step=Math.min(d,z.speed*dt);
    if(d>0){const nx=z.x+(goal.x-z.x)/d*step,ny=z.y+(goal.y-z.y)/d*step;
     if(!z.entered||!this.blocked(nx,ny,.6)){z.x=nx;z.y=ny;}
     else if(!this.blocked(nx,z.y,.6))z.x=nx;else if(!this.blocked(z.x,ny,.6))z.y=ny;
    }
+   z.vx=(z.x-oldX)/dt;z.vy=(z.y-oldY)/dt;z.travel=(z.travel||0)+Math.hypot(z.x-oldX,z.y-oldY);z.facing=Math.atan2(goal.y-z.y,goal.x-z.x);
   }
+  this.separateEnemies(dt);
   for(const e of this.effects)e.life-=dt;this.effects=this.effects.filter(e=>e.life>0).slice(-180);
   if(this.time-(this.cleanTime||0)>3){this.enemies=this.enemies.filter(z=>z.hp>0);this.cleanTime=this.time;}
   if(this.living().length===0||(this.node.mode==='hold'&&this.core.hp<=0)){this.end(false,this.living().length===0?'全队阵亡':'据点核心被毁');return;}
@@ -413,5 +544,10 @@ export class Game{
   return {remaining,acquired:{...this.acquired},fired:{...this.fired},lost:{...this.lost}};
  }
  serialize(){const obj={...this};delete obj.aiProvider;obj.rng={state:this.rng.state};obj.events=[];return JSON.stringify(obj);}
- static restore(raw,aiProvider=null){const v=typeof raw==='string'?JSON.parse(raw):raw;const g=Object.create(Game.prototype);Object.assign(g,v);g.rng=new RNG(1);g.rng.state=v.rng.state;g.aiProvider=aiProvider;g.events=[];return g;}
+ static restore(raw,aiProvider=null){
+  const v=typeof raw==='string'?JSON.parse(raw):raw,g=Object.create(Game.prototype);Object.assign(g,v);g.rng=new RNG(1);g.rng.state=v.rng.state;g.aiProvider=aiProvider;g.events=[];
+  g.projectiles??=[];g.lanes??=[];g.coordinationAge??=99;
+  for(const s of g.soldiers){s.vx??=0;s.vy??=0;s.facing??=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];s.recoil??=0;s.targetId??=null;s.activity??='guard';s.maneuverUntil??=0;s.assigned??=true;}
+  return g;
+ }
 }
