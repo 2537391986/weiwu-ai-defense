@@ -1,4 +1,4 @@
-export const VERSION='0.2.2';
+export const VERSION='0.3.0';
 export const UNIT_RADIUS=3.3,UNIT_SPACE=9;
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
@@ -76,6 +76,7 @@ export class Game{
   this.mod={reload:1,carry:1,armor:0,doors:1};this.tactic='balanced';this.decisionAge=99;this.decisions=0;this.neuralDecisions=0;
   this.aiState={action:'balanced',confidence:0,source:aiEnabled?'loading':'rules',reason:'等待战术态势'};
   this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;this.coordinationAge=99;this.lanes=[];this.tacticChangedAt=-99;this.tacticCandidate=null;this.trafficMigration=false;
+  this.fireteams=[];this.nextTeamId=1;this.teamRoster='';
   this.map=this.makeMap('warehouse');this.core={...CENTER,hp:1500,max:1500};this.setupGates();
   for(let i=0;i<12;i++)this.addSoldier(i<8?'m4':i<10?'benelli':'m249',false);
   this.deploy();this.log('全队集结','12名队员已就位。选择路线后自动部署。');
@@ -89,6 +90,7 @@ export class Game{
   const w=WEAPONS[weapon];
   if(giveAmmo)this.gainAmmo(w.ammo,weapon==='m4'?90:w.carry);
   const s={id:this.id++,x:200,y:205,hp:100,maxHP:100,weapon,mag:0,reserve:0,cooldown:this.rng.next(),reload:0,burst:0,side:0,goal:null,path:[],task:'guard',supply:null,supplyAssigned:null,travel:0,kills:0,shots:0,armor:0,vx:0,vy:0,facing:0,recoil:0,targetId:null,activity:'guard',maneuverUntil:0,formationSlot:null,formationSide:null,order:null,moveHeading:null,turnVelocity:0,guardPoint:null,nav:{lastCheck:0,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0}};
+  s.teamId=null;s.coop=null;s.relief=false;
   const spawn=this.freePoint(s,CENTER,'spawn');if(spawn){s.x=spawn.x;s.y=spawn.y;}
   this.soldiers.push(s);
   this.takeAmmo(s,w.carry);
@@ -128,6 +130,8 @@ export class Game{
   this.wave=0;this.nodeTime=0;this.enemies=[];this.projectiles=[];this.effects=[];this.lanes=[];
   this.map=this.makeMap(choice.template);this.setupGates();this.core={...CENTER,hp:1500,max:1500};
   for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.order=null;s.guardPoint=null;s.nav={lastCheck:this.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};s.mount=null;s.setup=3;s.vx=s.vy=0;s.moveHeading=null;s.targetId=null;s.localOffset=null;s.maneuverUntil=this.time;const safe=this.freePoint(s,s,'spawn');if(this.blocked(s.x,s.y,UNIT_RADIUS+.2)&&safe){s.x=safe.x;s.y=safe.y;}}
+  for(const team of this.fireteams){team.moverId=null;team.coverId=null;team.lastMoverId=null;team.readyAt=0;team.phase='hold';team.reason='';}
+  for(const s of this.living()){s.coop=null;s.relief=false;}
   this.deploy();this.beginWave();
   this.log('据点 '+(this.nodeIndex+1),choice.name+' · '+(choice.mode==='hold'?'限时坚守':'清剿')+'。幸存者恢复生命，弹药按原库存保留。');
   return true;
@@ -150,17 +154,17 @@ export class Game{
   return side===0?{x:g.x+offset,y:g.y+depth}:side===1?{x:g.x-depth,y:g.y+offset}:side===2?{x:g.x+offset,y:g.y-depth}:{x:g.x+depth,y:g.y+offset};
  }
  coordinate(force=false){
-  const alive=this.living(),guards=alive.filter(s=>s.task!=='supply'),pressure=this.sidePressure();
+  const alive=this.living(),guards=alive.filter(s=>s.task!=='supply'),pressure=this.sidePressure(),plans=[];
   const priority=this.tactic.startsWith('reinforce_')?ACTIONS.indexOf(this.tactic)-1:-1;
   const weights=pressure.map((p,i)=>1+Math.min(p/10,.8)+(i===priority?2:0));
   const desired=[0,0,0,0];
-  for(let i=0;i<guards.length;i++){let side=0;for(let j=1;j<4;j++)if((desired[j]+.8)/weights[j]<(desired[side]+.8)/weights[side])side=j;desired[side]++;}
-  const counts=[0,0,0,0];for(const s of guards)counts[s.side]++;
+  for(let i=0;i<alive.length;i++){let side=0;for(let j=1;j<4;j++)if((desired[j]+.8)/weights[j]<(desired[side]+.8)/weights[side])side=j;desired[side]++;}
+  const counts=[0,0,0,0];for(const s of alive)counts[s.side]++;
   // Transfer the nearest available soldiers, never reshuffle the entire roster.
   for(let n=0;n<(force?2:1);n++){
-   let side=-1;for(let i=0;i<4;i++)if(desired[i]>counts[i]&&(side<0||desired[i]-counts[i]>desired[side]-counts[side]))side=i;
+   let side=-1;for(let i=0;i<4;i++)if(desired[i]>counts[i]&&(i===priority||counts[i]===0||desired[i]-counts[i]>=2||pressure[i]>3)&&(side<0||desired[i]-counts[i]>desired[side]-counts[side]))side=i;
    if(side<0)break;
-   const candidates=guards.filter(s=>counts[s.side]>desired[s.side]&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0));
+   const candidates=guards.filter(s=>counts[s.side]>desired[s.side]&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0)&&this.canLeaveForSupply(s));
    candidates.sort((a,b)=>dist(a,this.gates[side])-dist(b,this.gates[side])||(a.id-b.id));
    const unit=candidates[0];if(!unit)break;counts[unit.side]--;counts[side]++;unit.side=side;unit.formationSlot=null;unit.formationSide=null;unit.localOffset=null;unit.order=null;unit.maneuverUntil=this.time+7;
   }
@@ -169,6 +173,11 @@ export class Game{
    // A carrier keeps their slot. Nobody slides sideways when a teammate leaves or returns.
    for(const s of members)if(s.formationSide===side&&Number.isInteger(s.formationSlot)&&!slots.has(s.formationSlot))slots.add(s.formationSlot);else{s.formationSlot=null;s.formationSide=side;}
    for(const s of members)if(s.formationSlot===null){let slot=0;while(slots.has(slot))slot++;s.formationSlot=slot;slots.add(slot);}
+   // Fill a vacated front slot without pulling every remaining soldier forward.
+   for(const vacancy of [0,1])if(!slots.has(vacancy)){
+    const replacement=group.filter(s=>s.formationSlot>=2&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&s.mag>0&&!this.inTransit(s)).sort((a,b)=>dist(a,gate)-dist(b,gate)||a.id-b.id)[0];
+    if(replacement){slots.delete(replacement.formationSlot);replacement.formationSlot=vacancy;replacement.relief=true;slots.add(vacancy);}
+   }
    const lane=this.lanes[side]||(this.lanes[side]={depth:0,previous:0,since:this.time,holdUntil:0});
    const intruders=this.enemies.filter(z=>z.hp>0&&z.side===side&&z.entered&&dist(z,CENTER)<68).length;
    let depth=0;
@@ -176,27 +185,106 @@ export class Game{
    else if(gate.hp/gate.max<.22&&pressure[side]>5)depth=10;
    if(depth<lane.depth&&this.time<lane.holdUntil)depth=lane.depth;
    if(depth!==lane.depth){lane.previous=lane.depth;lane.depth=depth;lane.since=this.time;lane.holdUntil=this.time+6;}
-   const reloading=group.filter(s=>s.reload>0&&dist(s,gate)<35),ready=group.filter(s=>s.reload<=0&&s.mag>0&&!this.inTransit(s));
-   lane.coverIds=(lane.coverIds||[]).filter(id=>group.some(s=>s.id===id&&s.mag>0&&s.reload<=0)).slice(0,reloading.length);
-   for(const s of ready.slice().sort((a,b)=>dist(a,gate)-dist(b,gate)||a.id-b.id))if(lane.coverIds.length<reloading.length&&!lane.coverIds.includes(s.id))lane.coverIds.push(s.id);
    for(const s of group){
     const w=WEAPONS[s.weapon],slot=s.formationSlot;
-    if(w.fixed&&s.mount){this.setGoal(s,s.mount,{kind:'mount',priority:100,force:true});continue;}
+    if(w.fixed&&s.mount){plans.push({s,point:s.mount,kind:'mount',priority:100,force:true});continue;}
     // Alternate the first and second element so one can cover the other's withdrawal.
     const delay=(slot%2)*1.2,retreat=this.time-lane.since<delay?lane.previous:lane.depth;
     let depthBase=w.fixed?14:s.weapon==='benelli'?8:s.weapon==='m249'?17:s.weapon==='m110'||s.weapon==='m203'?21:11;
-    const settled=!this.inTransit(s),covering=lane.coverIds.includes(s.id);
-    depthBase+=Math.floor(slot/2)*9+retreat+(s.reload>0&&settled?8:0)-(covering?3:0);
+    const settled=!this.inTransit(s);
+    depthBase+=Math.floor(slot/2)*9+retreat+(s.reload>0&&settled?8:0);
     let offset=(slot%2?1:-1)*(Math.floor(slot/2)%2?9:4.5);
     if(s.localOffset&&(s.localOffset.until>this.time||pressure[side]>0))offset+=s.localOffset.amount;
     else s.localOffset=null;
     let point=s.localOffset?.point&&retreat===0?s.localOffset.point:this.formationPoint(side,depthBase,offset);
     if(this.blocked(point.x,point.y,UNIT_RADIUS+.2))point=this.formationPoint(side,depthBase+9,offset);
-    const kind=retreat>0?'retreat':s.reload>0&&settled?'reload':covering?'cover':s.localOffset?'reposition':'formation';
-    this.setGoal(s,point,{kind,priority:retreat>0?80+retreat:kind==='reload'?30:covering?25:kind==='reposition'?20:10});
-    s.covering=covering;s.retreating=retreat>0;s.holdPoint={...(s.goal||point)};
+    const kind=retreat>0?'retreat':s.reload>0&&settled?'reload':s.relief?'relief':s.localOffset?'reposition':'formation';
+    plans.push({s,point,kind,priority:retreat>0?80+retreat:kind==='relief'?35:kind==='reload'?30:kind==='reposition'?20:10});
    }
   }
+  this.refreshTeams(alive);this.applyTeamPlans(plans);
+  for(const s of guards){s.retreating=s.order?.kind==='retreat'&&this.inTransit(s);s.holdPoint={...(s.goal||s)};if(s.relief&&s.order?.kind==='relief'&&!this.inTransit(s))s.relief=false;}
+ }
+ refreshTeams(alive=this.living()){
+  const signature=alive.map(s=>s.id+':'+s.side).join(',');if(signature===this.teamRoster)return;
+  this.teamRoster=signature;
+  const byId=new Map(alive.map(s=>[s.id,s])),assigned=new Set();
+  for(const team of this.fireteams){team.members=team.members.filter(id=>byId.has(id)&&byId.get(id).side===team.side&&!assigned.has(id));for(const id of team.members)assigned.add(id);}
+  this.fireteams=this.fireteams.filter(t=>t.members.length);
+  for(let side=0;side<4;side++){
+   const units=alive.filter(s=>s.side===side&&!assigned.has(s.id)).sort((a,b)=>(a.formationSlot??99)-(b.formationSlot??99)||a.id-b.id);
+   for(const s of units){let team=this.fireteams.find(t=>t.side===side&&t.members.length<3);if(!team){team={id:this.nextTeamId++,side,members:[],moverId:null,coverId:null,lastMoverId:null,readyAt:0,phase:'hold',reason:'',since:this.time};this.fireteams.push(team);}team.members.push(s.id);assigned.add(s.id);}
+   const teams=this.fireteams.filter(t=>t.side===side);
+   for(const single of teams.filter(t=>t.members.length===1)){
+    const partner=teams.find(t=>t!==single&&t.members.length===2);
+    if(partner){partner.members.push(single.members.pop());continue;}
+    const donor=teams.find(t=>t!==single&&t.members.length===3);
+    if(donor){const id=donor.members.findLast(id=>!this.inTransit(byId.get(id))&&byId.get(id).task!=='supply')??donor.members.at(-1);donor.members=donor.members.filter(x=>x!==id);single.members.push(id);}
+   }
+  }
+  this.fireteams=this.fireteams.filter(t=>t.members.length);
+  for(const team of this.fireteams)for(const id of team.members)byId.get(id).teamId=team.id;
+ }
+ setCoop(s,role,partnerId=null,reason=''){
+  if(s.coop?.role!==role||s.coop?.partnerId!==partnerId||s.coop?.reason!==reason)s.coop={role,partnerId,reason,since:this.time};
+  s.covering=role==='cover';
+ }
+ coverReady(s){return s.hp>0&&s.task!=='supply'&&s.mag>0&&s.reload<=0&&(!WEAPONS[s.weapon].fixed||!!s.mount)&&!this.inTransit(s)&&!s.nav?.yield&&this.los(s,this.gates[s.side]);}
+ needsPlan({s,point,kind}){
+  if(!s.goal)return true;
+  if(this.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2))return true;
+  if(dist(s.goal,point)<1.5)return false;
+  return !(s.order?.kind===kind&&s.order.request&&dist(s.order.request,point)<1.5);
+ }
+ applyTeamPlans(plans){
+  const byId=new Map(this.living().map(s=>[s.id,s])),byUnit=new Map(plans.map(p=>[p.s.id,p])),coops=new Map([...byId.values()].map(s=>[s.id,{s,role:'hold',partnerId:null,reason:''}]));
+  const assign=(s,role,partnerId=null,reason='')=>coops.set(s.id,{s,role,partnerId,reason});
+  for(const team of this.fireteams){
+   const members=team.members.map(id=>byId.get(id)).filter(Boolean),guards=members.filter(s=>s.task!=='supply');
+   let mover=byId.get(team.moverId);
+   if(mover&&(!members.includes(mover)||mover.hp<=0||mover.task==='supply'))mover=null;
+   if(mover&&!this.inTransit(mover)){team.lastMoverId=mover.id;team.readyAt=this.time+.75;mover=null;}
+   if(!mover)mover=guards.filter(s=>this.inTransit(s)).sort((a,b)=>(b.order?.priority||0)-(a.order?.priority||0)||a.id-b.id)[0]||null;
+   const pending=guards.map(s=>byUnit.get(s.id)).filter(p=>p&&p.kind!=='mount'&&this.needsPlan(p));
+   pending.sort((a,b)=>b.priority-a.priority||dist(a.s,this.gates[team.side])-dist(b.s,this.gates[team.side])||a.s.id-b.s.id);
+   const deploying=this.phase==='home'||this.phase==='route';
+   if(!mover&&(deploying||this.time>=(team.readyAt||0)))mover=pending.find(p=>p.s.goal)?.s||null;
+   team.moverId=mover?.id??null;
+   let protectedUnit=mover||members.find(s=>s.reload>0)||members.find(s=>s.task==='supply')||null;
+   const nextPlan=mover?byUnit.get(mover.id):null;
+   const reason=mover?(nextPlan?.kind==='retreat'?'retreat':this.inTransit(mover)?mover.order?.kind||'formation':nextPlan?.kind||'formation'):protectedUnit?.task==='supply'?'supply':protectedUnit?'reload':'';
+   const cover=protectedUnit?guards.filter(s=>s!==protectedUnit&&this.coverReady(s)).sort((a,b)=>(a.id===team.coverId?-1:0)-(b.id===team.coverId?-1:0)||dist(a,protectedUnit)-dist(b,protectedUnit)||a.id-b.id)[0]||null:null;
+   const previousPhase=team.phase,previousMover=team.activeId;
+   team.coverId=cover?.id??null;team.reason=reason;team.activeId=protectedUnit?.id??null;
+   team.phase=mover?'moving':this.time<(team.readyAt||0)?'handoff':protectedUnit?'support':'hold';
+   if(previousPhase!==team.phase||previousMover!==team.activeId)team.since=this.time;
+   for(const s of members){
+    const plan=byUnit.get(s.id);
+    if(s.task==='supply'){assign(s,'haul',cover?.id??null,'supply');continue;}
+    if(!plan)continue;
+    const unsafe=s.goal&&(this.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2)||this.soldiers.some(a=>a!==s&&a.hp>0&&a.id<s.id&&a.goal&&dist(a.goal,s.goal)<UNIT_SPACE-.05));
+    const danger=plan.kind==='retreat'&&(s.hp<28||this.enemies.some(z=>z.hp>0&&z.entered&&dist(z,s)<9));
+    const allowed=deploying||!s.goal||unsafe||plan.kind==='mount'||s===mover||danger;
+    if(allowed)this.setGoal(s,plan.point,plan);
+    if(s===cover&&!this.inTransit(s)&&!deploying)assign(s,'cover',protectedUnit.id,reason);
+    else if((s===mover||danger)&&this.inTransit(s))assign(s,'move',danger&&s!==mover?null:cover?.id??null,reason);
+    else if(!allowed&&this.needsPlan(plan))assign(s,'wait',mover?.id??team.lastMoverId,plan.kind);
+   }
+   team.moverId=mover&&this.inTransit(mover)?mover.id:null;
+   if(team.phase==='moving'&&!team.moverId)team.phase=protectedUnit?.reload>0||protectedUnit?.task==='supply'?'support':'hold';
+   const finalCover=team.phase==='hold'||!protectedUnit?null:cover&&this.coverReady(cover)?cover:guards.filter(s=>s!==protectedUnit&&this.coverReady(s)).sort((a,b)=>dist(a,protectedUnit)-dist(b,protectedUnit)||a.id-b.id)[0]||null;
+   team.coverId=finalCover?.id??null;
+   for(const s of members){const c=coops.get(s.id);if(c.role==='cover'&&s!==finalCover)assign(s,'hold');if(c.role==='move'&&s===protectedUnit)assign(s,'move',team.coverId,c.reason);}
+   if(finalCover&&!deploying)assign(finalCover,'cover',protectedUnit.id,reason);
+  }
+  for(const {s,role,partnerId,reason} of coops.values())this.setCoop(s,role,partnerId,reason);
+ }
+ teamFor(s){return this.fireteams.find(t=>t.id===s.teamId);}
+ canLeaveForSupply(s){
+  if(s.mag===0)return true;
+  const team=this.teamFor(s);if(!team)return true;
+  const others=team.members.map(id=>this.soldiers.find(a=>a.id===id)).filter(a=>a&&a!==s&&a.hp>0);
+  return !others.some(a=>a.task!=='supply'&&(a.reload>0||this.inTransit(a)))||others.some(a=>this.coverReady(a));
  }
  sidePressure(){
   const result=[0,0,0,0];
@@ -277,7 +365,7 @@ export class Game{
   if(s.goal&&s.order&&!force&&!oldInvalid){
    const emergency=priority>=80&&priority>=s.order.priority;
    const following=follow&&s.order.kind===kind&&dist(s.goal,p)>8&&this.time-s.order.issuedAt>=1.8;
-   if(!emergency&&!following){if(this.inTransit(s))return false;if(s.order.arrivedAt===null)s.order.arrivedAt=this.time;const immediate=(kind==='reload'||kind==='cover')&&priority>s.order.priority,hold=s.order.kind==='cover'||s.order.kind==='reload'?1.2:2.8;if(!immediate&&this.time-s.order.arrivedAt<hold)return false;}
+   if(!emergency&&!following){if(this.inTransit(s))return false;if(s.order.arrivedAt===null)s.order.arrivedAt=this.time;const immediate=['reload','cover','relief'].includes(kind)&&priority>s.order.priority,hold=s.order.kind==='cover'||s.order.kind==='reload'?1.2:2.8;if(!immediate&&this.time-s.order.arrivedAt<hold)return false;}
   }
   // The chosen vacancy remains reserved even when its desired formation point is occupied.
   if(!oldInvalid&&!force&&s.goal&&s.order?.kind===kind&&s.order.request&&dist(s.order.request,p)<1.5)return false;
@@ -417,9 +505,9 @@ export class Game{
    const reserved=alive.filter(s=>s.supply?.type===type&&s.supply.phase==='pickup').reduce((a,s)=>a+s.supply.qty,0);
    const qty=Math.min(this.capacity(target)-target.mag-target.reserve,this.stock[type]-reserved);
    if(qty<=0)continue;
-   const candidates=alive.filter(s=>s.task!=='supply'&&!WEAPONS[s.weapon].fixed&&s.supplyAssigned===null&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0));
+   const candidates=alive.filter(s=>s.task!=='supply'&&!WEAPONS[s.weapon].fixed&&s.supplyAssigned===null&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0)&&this.canLeaveForSupply(s));
    candidates.sort((a,b)=>(a.id===target.id?18:0)+dist(a,CENTER)-(b.id===target.id?18:0)-dist(b,CENTER));
-   const carrier=candidates[0]||(!WEAPONS[target.weapon].fixed&&!this.inTransit(target)?target:null);
+   const carrier=candidates[0]||(!WEAPONS[target.weapon].fixed&&!this.inTransit(target)&&this.canLeaveForSupply(target)?target:null);
    if(!carrier)continue;
    carrier.task='supply';carrier.supply={targetId:target.id,type,qty,cargo:0,phase:'pickup'};target.supplyAssigned=carrier.id;
    this.setGoal(carrier,CENTER,{kind:'supply-pickup',priority:40,force:true});
@@ -499,14 +587,15 @@ export class Game{
   return alive.find(a=>{if(a===s||a.hp<=0)return false;const t=((a.x-s.x)*dx+(a.y-s.y)*dy)/length;return t>.035&&t<.94&&Math.hypot(a.x-s.x-t*dx,a.y-s.y-t*dy)<2.7;})||null;
  }
  chooseTarget(s,targets,alive,committed){
-  const w=WEAPONS[s.weapon];let best=null,score=Infinity,blocked=null;
+  const w=WEAPONS[s.weapon],protectedUnit=s.coop?.role==='cover'?alive.find(a=>a.id===s.coop.partnerId&&a.hp>0):null;let best=null,score=Infinity,blocked=null;
   for(const z of targets){
    if(z.hp<=0)continue;
    const d=dist(s,z);if(d>Math.min(w.range,ENGAGEMENT[s.weapon])||(w.minRange&&d<w.minRange)||!this.los(s,z))continue;
    if(w.blast&&alive.some(a=>dist(a,z)<w.blast+2))continue;
    if((committed.get(z.id)||0)>=z.hp*1.05&&!w.blast)continue;
    if(this.friendlyBlocker(s,z,alive)){if(!blocked||dist(s,z)<dist(s,blocked))blocked=z;continue;}
-   let v=d+(z.id===s.targetId?-9:0)+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0);
+   const protect=protectedUnit&&z.entered?Math.max(0,24-dist(z,protectedUnit))*2:0;
+   let v=d+(z.id===s.targetId?-9:0)+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0)-protect;
    if(z.side!==s.side&&!z.inside)v+=45;
    if(v<score){best=z;score=v;}
   }
@@ -562,11 +651,11 @@ export class Game{
    const angle=Math.atan2(aim.y-s.y,aim.x-s.x)+scan,delta=angleDiff(angle,s.facing),desiredTurn=clamp(delta*7,best?-5.5:-3.4,best?5.5:3.4);
    s.turnVelocity=(s.turnVelocity||0)+(desiredTurn-(s.turnVelocity||0))*Math.min(1,dt*9);
    s.facing+=clamp(s.turnVelocity*dt,-Math.abs(delta),Math.abs(delta));
-   s.activity=s.nav?.yield?'yield':this.time<(s.nav?.waitUntil||0)?'wait':s.task==='supply'?'haul':s.reload>0?'reload':Math.hypot(s.vx||0,s.vy||0)>.7?(s.retreating?'retreat':'move'):s.covering?'cover':best?'aim':'guard';
+   s.activity=s.nav?.yield?'yield':this.time<(s.nav?.waitUntil||0)?'wait':s.task==='supply'?'haul':s.reload>0?'reload':Math.hypot(s.vx||0,s.vy||0)>.7?(s.retreating?'retreat':s.order?.kind==='relief'?'relief':'move'):s.covering?'cover':s.coop?.role==='wait'?'team-wait':best?'aim':'guard';
    if(w.fixed&&!s.mount){if(s.goal&&dist(s,s.goal)>1.3)continue;s.setup=(s.setup??3)-dt;if(s.setup>0)continue;s.mount={x:s.x,y:s.y};}
    if(s.reload>0){s.reload-=dt;if(s.reload<=0){const n=Math.min(w.mag-s.mag,s.reserve);s.mag+=n;s.reserve-=n;}continue;}
-   const buddy=alive.some(a=>a!==s&&a.side===s.side&&a.task!=='supply'&&a.reload<=0&&a.mag>WEAPONS[a.weapon].mag*.4);
-   const someoneReloading=alive.some(a=>a!==s&&a.side===s.side&&a.reload>0);
+   const buddy=alive.some(a=>a!==s&&a.teamId===s.teamId&&this.coverReady(a)&&a.mag>WEAPONS[a.weapon].mag*.4);
+   const someoneReloading=alive.some(a=>a!==s&&a.teamId===s.teamId&&a.reload>0);
    if(s.reserve>0&&(s.mag===0||(w.mag>7&&s.mag<w.mag*.18&&s.burst===0&&buddy&&!someoneReloading))){s.reload=w.reload/this.mod.reload;s.activity='reload';this.coordinationAge=99;continue;}
    if(s.cooldown>0)continue;
    if(best&&(committed.get(best.id)||0)>=best.hp*1.05)best=this.chooseTarget(s,targets,alive,committed);
@@ -680,7 +769,9 @@ export class Game{
  static restore(raw,aiProvider=null){
   const v=typeof raw==='string'?JSON.parse(raw):raw,g=Object.create(Game.prototype);Object.assign(g,v);g.rng=new RNG(1);g.rng.state=v.rng.state;g.aiProvider=aiProvider;g.events=[];
   g.projectiles??=[];g.lanes??=[];g.coordinationAge??=99;g.tacticChangedAt??=-99;g.tacticCandidate??=null;g.trafficMigration=!!g.trafficMigration||g.soldiers.some(s=>!s.nav);
-  for(const s of g.soldiers){s.vx??=0;s.vy??=0;s.facing??=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];s.recoil??=0;s.targetId??=null;s.activity??='guard';s.maneuverUntil??=0;s.assigned??=true;s.formationSlot??=null;s.formationSide??=null;s.order??=null;s.moveHeading??=null;s.turnVelocity??=0;s.guardPoint??=null;s.nav??={lastCheck:g.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};}
+  const oldTeams=!g.fireteams;g.fireteams??=[];g.nextTeamId??=1;g.teamRoster??='';
+  for(const s of g.soldiers){s.vx??=0;s.vy??=0;s.facing??=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];s.recoil??=0;s.targetId??=null;s.activity??='guard';s.maneuverUntil??=0;s.assigned??=true;s.formationSlot??=null;s.formationSide??=null;s.order??=null;s.moveHeading??=null;s.turnVelocity??=0;s.guardPoint??=null;s.nav??={lastCheck:g.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};s.teamId??=null;s.coop??=null;s.relief??=false;}
+  if(oldTeams)g.refreshTeams();
   return g;
  }
 }
