@@ -248,3 +248,124 @@ test('a critically threatened coverer can escape without waiting and is not stil
  cover.hp=20;g.time+=1.3;g.coordinate();assert.equal(cover.order.kind,'retreat');assert.ok(g.inTransit(cover));assert.notEqual(cover.coop.role,'cover');
  const team=g.teamFor(cover);assert.notEqual(team.coverId,cover.id);assert.ok(g.living().filter(s=>s.side===0&&s.coop?.role==='move').length>=2);accounting(g);
 });
+
+test('terrain changes actual entrance sightlines and approach distance',()=>{
+ const results={};
+ for(const template of ['warehouse','house','yard']){
+  const g=new Game({seed:71});g.map=g.makeMap(template);g.setupGates();
+  results[template]={north:g.los({x:210,y:150},{x:210,y:100}),east:g.los({x:250,y:215},{x:300,y:215}),approach:0};
+  assert.ok(g.los({x:200,y:150},{x:200,y:100}),'the centre of the north entrance stays open');
+  for(let i=0;i<20;i++){const z=g.spawnEnemy('walker',0);results[template].approach+=Math.abs(g.gates[0].y-z.y);}
+ }
+ assert.equal(results.house.east,false);assert.equal(results.warehouse.east,true);
+ assert.equal(results.warehouse.north,false);assert.equal(results.yard.north,true);
+ assert.ok(results.house.approach<results.warehouse.approach-400,'house streets lead to closer contact');
+});
+
+test('crowds use the open entrances on every terrain without getting stuck in the walls',()=>{
+ for(const template of ['warehouse','house','yard']){
+  const g=new Game({seed:71});g.start();g.enterNode({template,mode:'hold',danger:0,flavor:'final',name:template});
+  g.holdDuration=999;g.remaining=1000;g.spawnClock=999;g.core.hp=g.core.max=1e6;
+  for(const s of g.soldiers){s.cooldown=999;s.hp=s.maxHP=1e6;}
+  for(const gate of g.gates)gate.hp=0;
+  const crowd=Array.from({length:24},()=>g.spawnEnemy('walker',0));
+  for(let i=0;i<2400&&!crowd.every(z=>z.entered&&z.y>138);i++)g.step(1/30);
+  assert.ok(crowd.every(z=>z.entered&&z.y>138),template+' crowd crosses the opening');
+  assert.ok(crowd.every(z=>!g.blocked(z.x,z.y,.6)));accounting(g);
+ }
+});
+
+test('route forecasts are distinct, reproducible and keep the advertised cache after a loadout change',()=>{
+ for(const seed of [11,22,33,44]){
+  const g=new Game({seed}),h=new Game({seed});g.start();h.start();assert.deepEqual(g.choices,h.choices);
+  assert.notEqual(g.choices[0].template,g.choices[1].template);assert.ok(g.choices.every(c=>c.fronts.length===2));
+  const route=g.choices[0],cache=structuredClone(route.payout.ammo);g.applyLoadout(g.packageCard('precision'));g.enterNode(route);
+  assert.deepEqual(g.node.payout.ammo,cache);assert.ok(g.map.terrain);accounting(g);
+ }
+});
+
+test('an armory equips the promised group only on site completion and can be claimed once',()=>{
+ const g=active();g.nodeIndex=1;g.node.payout={kind:'armory',card:g.packageCard('precision')};
+ const acquired={...g.acquired};g.finishWave();assert.deepEqual(g.acquired,acquired);assert.equal(g.living().filter(s=>s.weapon==='m110').length,0);
+ g.phase='combat';g.wave=2;g.finishWave();assert.equal(g.living().filter(s=>s.weapon==='m110').length,2);assert.equal(g.acquired.n762,120);
+ const paid=g.serialize();g.finishWave();g.claimNodePayout();assert.equal(g.serialize(),paid);
+ const h=Game.restore(paid,inferPolicy),before=h.inventory();h.claimNodePayout();assert.deepEqual(h.inventory(),before);accounting(h);
+});
+
+test('rescue converts only the carried ammunition of people who cannot join a full roster',()=>{
+ const g=active();while(g.living().length<34)g.addSoldier('m4');g.node.payout={kind:'rescue',count:2};
+ const acquired=g.acquired.n556;g.wave=2;g.finishWave();assert.equal(g.living().length,35);assert.equal(g.acquired.n556-acquired,180);
+ const before=g.inventory();g.claimNodePayout();assert.deepEqual(g.inventory(),before);accounting(g);
+});
+
+test('loadout previews are pure, preserve specialists and match the actual conversions and supply',()=>{
+ const g=active();g.applyLoadout(g.packageCard('precision'));g.applyLoadout(g.packageCard('fixed'));
+ const fixed=g.living().find(s=>s.weapon==='m2');fixed.mount={x:fixed.x,y:fixed.y};const card=g.packageCard('close'),before=g.serialize(),preview=g.loadoutPreview(card),acquired={...g.acquired};
+ assert.equal(g.serialize(),before);assert.equal(preview.changes.length,2);assert.ok(preview.changes.every(c=>c.from==='m4'));
+ const applied=g.applyLoadout(card);assert.deepEqual(applied,preview);
+ for(const change of preview.changes)assert.equal(g.soldiers.find(s=>s.id===change.id).weapon,change.to);
+ assert.equal(fixed.weapon,'m2');assert.ok(fixed.mount);assert.equal(g.living().filter(s=>s.weapon==='m110').length,2);
+ for(const [type,qty] of Object.entries(preview.ammo))assert.equal(g.acquired[type]-acquired[type],qty);accounting(g);
+});
+
+test('drafts retain three distinct usable choices, honour caps and include supply for empty weapons',()=>{
+ for(let seed=1;seed<=24;seed++){
+  const g=active(seed);g.nodeIndex=seed%4;
+  if(seed%2===0){while(g.living().length<35)g.addSoldier('m4');g.mod.armor=.4;g.mod.reload=1.4;g.mod.carry=1.6;}
+  if(seed%3===0){for(const s of g.living())burn(g,s);for(const type of Object.keys(g.stock)){g.lost[type]+=g.stock[type];g.stock[type]=0;}}
+  const cards=g.rewardChoices();assert.equal(cards.length,3);assert.equal(new Set(cards.map(c=>c.id)).size,3);
+  for(const c of cards){if(c.kind==='weapon'||c.kind==='loadout')assert.ok(g.loadoutPreview(c).changes.length);if(g.living().length===35)assert.notEqual(c.kind,'recruits');if(g.mod.armor===.4)assert.notEqual(c.kind,'armor');}
+  if(g.shortAmmoTypes().length)assert.ok(cards.some(c=>c.kind==='ammo'));accounting(g);
+ }
+});
+
+test('new supply cards add only the listed cartridges and never refill soldiers remotely',()=>{
+ const g=active();g.applyLoadout(g.packageCard('precision'));const card={id:'ammo',kind:'ammo',name:'补给',ammo:g.ammoPackage()},before=g.inventory(),carried=g.living().map(s=>[s.mag,s.reserve]);
+ g.phase='reward';g.wave=1;g.choices=[card];g.chooseReward(card.id);
+ for(const type of Object.keys(before.acquired))assert.equal(g.acquired[type]-before.acquired[type],card.ammo[type]||0);
+ assert.deepEqual(g.living().map(s=>[s.mag,s.reserve]),carried);assert.equal(g.acquired.n9,0);accounting(g);
+});
+
+test('precision weapons favour armour while riflemen continue handling nearby unarmoured enemies',()=>{
+ const g=active();g.applyLoadout(g.packageCard('precision'));const precision=g.soldiers.find(s=>s.weapon==='m110'),rifle=g.soldiers.find(s=>s.weapon==='m4');
+ for(const s of g.soldiers)if(s!==precision&&s!==rifle)s.hp=0;
+ for(const s of [precision,rifle]){s.x=200;s.y=200;s.targetId=null;s.coop=null;}
+ const walker=g.spawnEnemy('walker',0),heavy=g.spawnEnemy('heavy',0);Object.assign(walker,{x:185,y:200});Object.assign(heavy,{x:180,y:205});
+ assert.equal(g.chooseTarget(precision,[walker,heavy],g.living(),new Map()),heavy);
+ assert.equal(g.chooseTarget(rifle,[walker,heavy],g.living(),new Map()),walker);
+});
+
+test('grenadiers choose a safe cluster rather than spending a grenade on the nearer single target',()=>{
+ const g=active();g.applyLoadout(g.packageCard('grenadier'));const s=g.soldiers.find(s=>s.weapon==='m203');for(const a of g.soldiers)if(a!==s)a.hp=0;s.x=200;s.y=200;s.coop=null;s.targetId=null;
+ const single=g.spawnEnemy('walker',0);single.x=200;single.y=165;
+ const cluster=Array.from({length:4},(_,i)=>{const z=g.spawnEnemy('walker',0);z.x=204+(i%2)*2;z.y=159+Math.floor(i/2)*2;return z;});
+ assert.ok(cluster.includes(g.chooseTarget(s,[single,...cluster],g.living(),new Map())));
+});
+
+test('0.3 saves preserve the old battlefield and rewards until transferring to a new site',()=>{
+ const g=active(),v=JSON.parse(g.serialize());delete v.map.terrain;for(const gate of v.gates){delete gate.width;gate.hp=gate.max=700;}
+ v.map.walls=[{x:130,y:135,w:62,h:2},{x:208,y:135,w:62,h:2},{x:130,y:273,w:62,h:2},{x:208,y:273,w:62,h:2},{x:130,y:135,w:2,h:62},{x:130,y:213,w:2,h:62},{x:268,y:135,w:2,h:62},{x:268,y:213,w:2,h:62}];
+ delete v.node.fronts;delete v.node.payout;delete v.node.payoutClaimed;v.node.flavor='ammo';
+ const h=Game.restore(v,inferPolicy),map=structuredClone(h.map),inventory=h.inventory();h.remaining=1000;h.spawnClock=999;
+ for(let i=0;i<60;i++)h.step(1/30);assert.deepEqual(h.map,map);assert.equal(h.map.terrain,undefined);assert.deepEqual(h.inventory().acquired,inventory.acquired);
+ h.phase='combat';h.wave=2;const acquired={...h.acquired};h.finishWave();assert.equal(h.acquired.n556-acquired.n556,260);assert.equal(h.acquired.shell-acquired.shell,28);
+ h.choices=[{id:'legacy-m110',kind:'weapon',weapon:'m110',name:'M110'}];h.chooseReward('legacy-m110');assert.equal(h.acquired.n762,120);
+ h.enterNode(h.choices[0]);assert.ok(h.map.terrain);accounting(h);
+});
+
+test('14, 25 and 35 soldiers can cross each new terrain without losing reservations or passing through cover',()=>{
+ for(const count of [14,25,35])for(const template of ['warehouse','house','yard']){
+  const g=new Game({seed:71});while(g.living().length<count)g.addSoldier('m4');g.deploy();g.start();g.enterNode({template,mode:'hold',danger:0,flavor:'final',name:template});g.phase='home';g.deploy();g.phase='combat';
+  const destinations=g.living().map(s=>({x:400-s.x,y:410-s.y}));for(const s of g.living()){g.releaseOrder(s);s.guardPoint=null;}
+  for(let i=0;i<count;i++)assert.ok(g.setGoal(g.soldiers[i],destinations[i]));
+  movement(g,210);assert.ok(g.living().every(s=>!g.inTransit(s)),template+' / '+count+' complete their crossing');spaced(g.living());accounting(g);
+ }
+});
+
+test('new sites deploy a fixed-gun group toward forecast pressure while keeping its partners together',()=>{
+ const g=active();g.applyLoadout(g.packageCard('fixed'));const gun=g.living().find(s=>s.weapon==='m2'),team=g.teamFor(gun),partners=[...team.members],oldSide=gun.side;
+ const front=(oldSide+1)%4;g.tactic='reinforce_west';g.phase='route';g.enterNode({template:'warehouse',mode:'hold',danger:0,flavor:'final',name:'仓库',fronts:[front]});
+ assert.equal(gun.side,front);assert.deepEqual(g.teamFor(gun).members,partners);
+ for(const s of g.living()){assert.ok(s.goal);assert.ok(Math.hypot(s.x-s.goal.x,s.y-s.goal.y)<.01,'setup completes before combat');}
+ const positions=g.living().map(s=>[s.x,s.y]);g.tactic='reinforce_south';g.coordinate(true);assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions,'battle orders never teleport units');accounting(g);
+});
