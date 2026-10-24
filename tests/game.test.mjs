@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Game,WEAPONS,ACTIONS,UNIT_RADIUS,UNIT_SPACE} from '../dist/engine.js';
+import {CombatFeedback,BattleAudio} from '../dist/feedback.js';
 import {inferPolicy,AI_META} from '../dist/ai-model.js';
 
 function accounting(g){const i=g.inventory();for(const t of Object.keys(i.acquired)){assert.ok(i.remaining[t]>=0,t+' remaining nonnegative');assert.equal(i.acquired[t],i.remaining[t]+i.fired[t]+i.lost[t],t+' ammunition conserved');}}
@@ -463,4 +464,32 @@ test('a hauler can fetch and deliver through a settled 25-person retreat without
  const g=new Game({seed:71});while(g.living().length<25)g.addSoldier('m4');g.deploy();g.start();g.enterNode({template:'warehouse',mode:'hold',danger:0,name:'test'});g.time=10;
  for(let i=0;i<4;i++){const z=g.spawnEnemy('walker',0);z.x=194+i*4;z.y=160;z.entered=z.inside=true;}g.coordinate();advanceFront(g,100);assert.ok(g.living().every(s=>!g.inTransit(s)));
  const recipient=g.soldiers[0];burn(g,recipient);g.assignSupplies();assert.ok(recipient.supplyAssigned);advanceFront(g,100);assert.equal(g.supplyRuns,1);assert.equal(recipient.reserve,90);assert.ok(g.living().every(s=>!g.inTransit(s)));spaced(g.living());accounting(g);
+});
+
+function fakeAudio({panner=true,blocked=false}={}){
+ const param=()=>({value:0,setValueAtTime(v){this.value=v;},linearRampToValueAtTime(v){this.value=v;},exponentialRampToValueAtTime(v){this.value=v;},setTargetAtTime(v){this.value=v;},cancelScheduledValues(){}});
+ const context={state:'suspended',currentTime:0,sampleRate:44100,destination:{},sources:[],buffers:0,resumes:0,async resume(){this.resumes++;if(blocked)throw new Error('blocked');this.state='running';},async suspend(){this.state='suspended';},advance(dt){this.currentTime+=dt;for(const n of this.sources)if(!n.ended&&n.end<=this.currentTime){n.ended=true;n.onended?.();}}};
+ const node=()=>({gain:param(),frequency:param(),pan:param(),threshold:param(),knee:param(),ratio:param(),attack:param(),release:param(),connect(){},disconnect(){},start(){},stop(time){this.end=time??0;if(time===undefined&&!this.ended){this.ended=true;this.onended?.();}}});
+ context.createGain=context.createDynamicsCompressor=context.createBiquadFilter=node;context.createOscillator=context.createBufferSource=()=>{const n=node();context.sources.push(n);return n;};
+ context.createBuffer=(channels,length)=>{context.buffers++;const data=new Float32Array(length);return {getChannelData(){return data;}};};if(panner)context.createStereoPanner=node;return context;
+}
+test('combat feedback follows real shots and reloads without replaying restored history or counting shotgun pellets',()=>{
+ const g=active(),f=new CombatFeedback();f.reset(g);const s=g.soldiers.find(s=>s.weapon==='benelli'),z=g.spawnEnemy('walker',s.side);z.x=s.x;z.y=s.y+20;g.fire(s,z);let cues=f.collect(g);assert.equal(cues.filter(c=>c.type==='shot').length,1);assert.equal(g.projectiles.length,7);assert.deepEqual(f.collect(g),[]);
+ s.reload=2;assert.equal(f.collect(g).filter(c=>c.type==='reload').length,1);s.reload=0;assert.equal(f.collect(g).filter(c=>c.type==='ready').length,1);const restored=Game.restore(g.serialize());assert.deepEqual(f.collect(restored),[]);restored.wave++;assert.deepEqual(f.collect(restored),[]);accounting(g);
+});
+test('presentation feedback has no effect on simulation decisions, random state or ammunition',()=>{
+ const g=active(71),h=Game.restore(g.serialize(),inferPolicy),f=new CombatFeedback();f.reset(h);for(let i=0;i<900;i++){g.step(1/30);h.step(1/30);f.collect(h);}assert.equal(g.serialize(),h.serialize());accounting(h);
+});
+test('sound creates no context until enabled and unlocked, and mute stops all current voices immediately',async()=>{
+ const c=fakeAudio();let calls=0;const a=new BattleAudio({contextFactory:()=>{calls++;return c;}});assert.equal(await a.unlock(),false);assert.equal(calls,0);a.setEnabled(true);assert.equal(await a.unlock(),true);assert.equal(calls,1);assert.equal(c.buffers,1);assert.deepEqual(a.playBatch([{type:'shot',weapon:'m4'}]),[]);a.setActive(true);assert.equal(a.playBatch([{type:'shot',weapon:'m4',x:180,y:160}]).length,1);assert.equal(a.voices.size,1);a.setEnabled(false);assert.equal(a.voices.size,0);assert.equal(a.master.gain.value,0);assert.deepEqual(a.playBatch([{type:'blast'}]),[]);a.setEnabled(true);await a.unlock();assert.equal(calls,1);assert.equal(c.buffers,1);assert.deepEqual(a.playBatch([]),[],'unmute has no queued replay');
+});
+test('crowded and accelerated battle audio is bounded, coalesces repeated shots and prioritizes explosions',async()=>{
+ const c=fakeAudio(),a=new BattleAudio({contextFactory:()=>c});a.setEnabled(true);await a.unlock();a.setActive(true);const storm=Array.from({length:500},(_,i)=>({type:'shot',weapon:Object.keys(WEAPONS)[i%7],x:i%400,y:150}));storm.push({type:'blast',x:200,y:200});const first=a.playBatch(storm);assert.equal(first[0].type,'blast');assert.ok(first.length<=4);assert.equal(new Set(first.map(c=>c.type==='shot'?c.weapon:c.type)).size,first.length);
+ let count=first.length;for(let i=0;i<120;i++){c.advance(1/120);count+=a.playBatch(storm).length;assert.ok(a.voices.size<=10);}assert.ok(count<=40,'a 500-event storm cannot create an unbounded sound queue');c.advance(1);assert.equal(a.voices.size,0);a.setActive(false);assert.equal(a.master.gain.value,0);
+});
+test('background and pause stop sound, while a resume gesture reuses the context',async()=>{
+ const c=fakeAudio({panner:false}),a=new BattleAudio({contextFactory:()=>c});a.setEnabled(true);await a.unlock();a.setActive(true);assert.equal(a.playBatch([{type:'shot',weapon:'m249'}]).length,1);a.sleep();assert.equal(c.state,'suspended');assert.equal(a.voices.size,0);assert.equal(a.active,false);assert.deepEqual(a.playBatch([{type:'shot',weapon:'m249'}]),[]);await a.unlock();a.setActive(true);assert.equal(c.resumes,2);assert.equal(a.playBatch([{type:'shot',weapon:'m110'}]).length,1);a.setActive(false);assert.equal(a.voices.size,0);
+});
+test('unavailable or blocked sound resolves safely without starting voices',async()=>{
+ for(const factory of [()=>null,()=>{throw new Error('unsupported');},()=>fakeAudio({blocked:true})]){const a=new BattleAudio({contextFactory:factory});a.setEnabled(true);assert.equal(await a.unlock(),false);assert.equal(a.error,true);a.setActive(true);assert.deepEqual(a.playBatch([{type:'blast'}]),[]);assert.equal(a.voices.size,0);}
 });
