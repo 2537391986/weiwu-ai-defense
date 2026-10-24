@@ -1,4 +1,4 @@
-export const VERSION='0.5.0';
+export const VERSION='0.6.0';
 export const UNIT_RADIUS=3.3,UNIT_SPACE=9;
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
@@ -89,6 +89,7 @@ export class Game{
   this.aiState={action:'balanced',confidence:0,source:aiEnabled?'loading':'rules',reason:'等待战术态势'};
   this.lastAiAction='';this.supplyRuns=0;this.selectedId=null;this.lastCheckpoint=null;this.coordinationAge=99;this.lanes=[];this.tacticChangedAt=-99;this.tacticCandidate=null;this.trafficMigration=false;
   this.ammoHandoffs=[];this.buddyTransfers=0;
+  this.frontResponseAt=-99;
   this.fireteams=[];this.nextTeamId=1;this.teamRoster='';
   this.map=this.makeMap('warehouse');this.core={...CENTER,hp:1500,max:1500};this.setupGates();
   for(let i=0;i<12;i++)this.addSoldier(i<8?'m4':i<10?'benelli':'m249',false);
@@ -152,11 +153,11 @@ export class Game{
  enterNode(choice){
   if(this.phase!=='route')return false;
   this.nodeIndex++;this.node={...choice};this.routeHistory.push({...choice,stage:this.nodeIndex});
-  this.wave=0;this.nodeTime=0;this.ammoHandoffs=[];this.lastBuddyTransfer=null;this.enemies=[];this.projectiles=[];this.effects=[];this.lanes=[];
+  this.wave=0;this.nodeTime=0;this.frontResponseAt=-99;this.ammoHandoffs=[];this.lastBuddyTransfer=null;this.enemies=[];this.projectiles=[];this.effects=[];this.lanes=[];
   this.map=this.makeMap(choice.template);this.setupGates();this.core={...CENTER,hp:1500,max:1500};
   for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.order=null;s.guardPoint=null;s.nav={lastCheck:this.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};s.mount=null;s.setup=3;s.vx=s.vy=0;s.moveHeading=null;s.targetId=null;s.localOffset=null;s.maneuverUntil=this.time;const safe=this.freePoint(s,s,'spawn');if(this.blocked(s.x,s.y,UNIT_RADIUS+.2)&&safe){s.x=safe.x;s.y=safe.y;}}
   for(const team of this.fireteams){team.moverId=null;team.coverId=null;team.lastMoverId=null;team.readyAt=0;team.phase='hold';team.reason='';}
-  for(const s of this.living()){s.coop=null;s.relief=false;s.lastContactAt=this.time;}
+  for(const s of this.living()){s.coop=null;s.relief=false;s.reinforcement=null;s.lastContactAt=this.time;}
   this.tactic='balanced';this.tacticCandidate=null;this.tacticChangedAt=-99;this.lastAiAction='';
   this.prepareSiteDeployment();this.deploy();this.beginWave();
   this.log('据点 '+(this.nodeIndex+1),choice.name+' · '+(choice.mode==='hold'?'限时坚守':'清剿')+'。幸存者恢复生命，弹药按原库存保留。');
@@ -191,15 +192,67 @@ export class Game{
   const g=this.gates[side];
   return side===0?{x:g.x+offset,y:g.y+depth}:side===1?{x:g.x-depth,y:g.y+offset}:side===2?{x:g.x+offset,y:g.y-depth}:{x:g.x+depth,y:g.y+offset};
  }
+ updateFronts(pressure,alive){
+  for(let side=0;side<4;side++){
+   const gate=this.gates[side],lane=this.lanes[side]||(this.lanes[side]={depth:0,previous:0,since:this.time,holdUntil:0});
+   const intruders=this.enemies.filter(z=>z.hp>0&&z.side===side&&z.entered&&dist(z,CENTER)<68).length;
+   const alarm=(gate.hp/gate.max<.38&&pressure[side]>=2)||pressure[side]>7;
+   let requested=0;
+   if((gate.hp===0&&(pressure[side]>2||intruders))||(this.tactic==='fallback'&&(pressure[side]>1||intruders))||intruders>=2)requested=intruders>=4?25:13;
+   else if(gate.hp/gate.max<.22&&pressure[side]>5)requested=10;
+   const quiet=pressure[side]<1&&!intruders;
+   if(quiet){lane.quietSince??=this.time;}else lane.quietSince=null;
+   let depth=lane.depth;
+   if(requested>depth){lane.recovering=false;depth=requested;lane.holdUntil=this.time+6;lane.recoverAt=this.time+6;}
+   else if(depth>requested&&quiet&&this.time-lane.quietSince>=4&&this.time>=lane.holdUntil&&this.time>=(lane.recoverAt||0)){
+    lane.recovering=true;depth=Math.max(requested,depth-6);lane.recoverAt=this.time+4;
+   }
+   if(depth!==lane.depth){lane.previous=lane.depth;lane.depth=depth;lane.since=this.time;}
+   const moving=alive.some(s=>s.side===side&&s.task!=='supply'&&this.inTransit(s)&&s.order?.kind==='retreat');
+   if(!quiet&&requested>=depth)lane.recovering=false;
+   const state=lane.recovering?'recover':depth>0?(moving||this.time-lane.since<1.2?'withdraw':'hold'):alarm?'alarm':'guard';
+   if(state!==lane.state){const old=lane.state;lane.state=state;lane.stateSince=this.time;if(this.phase==='combat'&&old&&state!=='guard')this.log(SIDES[side]+({alarm:'告急',withdraw:'退守',hold:'稳住',recover:'恢复阵位'}[state]),{alarm:'邻近入口保留接火人员，按余力调派增援。',withdraw:'前排分批后撤，搭档留位接火。',hold:'守住内侧阵位，继续观察入口压力。',recover:'入口压力减轻，逐段恢复阵位。'}[state]);}
+   lane.intruders=intruders;lane.pressure=pressure[side];
+  }
+ }
+ frontSummary(){
+  if(this.phase!=='combat')return '';
+  const ranks={withdraw:5,hold:4,alarm:3,recover:2,guard:0};
+  const front=this.lanes.map((lane,side)=>({lane,side})).filter(x=>x.lane&&ranks[x.lane.state]).sort((a,b)=>ranks[b.lane.state]-ranks[a.lane.state]||b.lane.pressure-a.lane.pressure)[0];
+  if(!front)return '';
+  const labels={alarm:'入口告急',withdraw:'分批退守',hold:'内侧坚守',recover:'逐段恢复'},incoming=this.living().find(s=>s.reinforcement?.to===front.side&&!s.reinforcement.returning&&this.inTransit(s));
+  return SIDES[front.side]+' · '+labels[front.lane.state]+(incoming?'，#'+incoming.id+' 正在增援':'');
+ }
+ respondToFronts(alive,pressure){
+  for(const s of alive)if(s.reinforcement?.returning&&s.order?.kind==='restore'&&!this.inTransit(s))s.reinforcement=null;
+  if(this.phase!=='combat'||this.time<this.frontResponseAt)return;
+  const counts=[0,0,0,0];for(const s of alive)counts[s.side]++;
+  const ready=s=>s.task!=='supply'&&!WEAPONS[s.weapon].fixed&&s.mag>0&&s.reload<=0&&!this.handoffFor(s)&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0)&&this.canLeaveForSupply(s);
+  // One nearby reinforcement travels at a time, with a rear element left to cover its own entrance.
+  const fronts=[0,1,2,3].filter(side=>['alarm','withdraw','hold'].includes(this.lanes[side].state)&&pressure[side]>=2).sort((a,b)=>(this.lanes[b].intruders||0)-(this.lanes[a].intruders||0)||pressure[b]-pressure[a]);
+  for(const side of fronts){
+   if(counts[side]>=Math.ceil(alive.length/4)+2||alive.some(s=>s.reinforcement?.to===side&&!s.reinforcement.returning&&this.inTransit(s)))continue;
+   const candidates=alive.filter(s=>!s.reinforcement&&ready(s)&&[1,3].includes((s.side-side+4)%4)&&counts[s.side]>=3&&pressure[s.side]<2&&this.lanes[s.side].state==='guard'&&alive.some(a=>a!==s&&a.side===s.side&&this.coverReady(a)));
+   candidates.sort((a,b)=>dist(a,this.gates[side])-dist(b,this.gates[side])||(b.formationSlot??0)-(a.formationSlot??0)||a.id-b.id);
+   const s=candidates[0];if(!s)continue;const from=s.side;s.reinforcement={from,to:side,returning:false,since:this.time};s.side=side;s.formationSlot=null;s.formationSide=null;s.localOffset=null;this.releaseOrder(s);s.maneuverUntil=this.time+7;this.frontResponseAt=this.time+6;
+   this.log(SIDES[side]+'增援','#'+s.id+' 从'+SIDES[from]+'前往支援，原入口继续留人接火。');return;
+  }
+  // A reinforcement returns physically only after both entrances have been quiet for a while.
+  const returning=alive.filter(s=>s.reinforcement&&!s.reinforcement.returning&&ready(s)&&this.lanes[s.side].state==='guard'&&this.lanes[s.reinforcement.from].state==='guard'&&this.lanes[s.side].quietSince!==null&&this.time-this.lanes[s.side].quietSince>=6&&counts[s.side]>1);
+  returning.sort((a,b)=>a.reinforcement.since-b.reinforcement.since||a.id-b.id);
+  const s=returning[0];if(s){s.side=s.reinforcement.from;s.reinforcement.returning=true;s.formationSlot=null;s.formationSide=null;s.localOffset=null;this.releaseOrder(s);s.maneuverUntil=this.time+7;this.frontResponseAt=this.time+6;this.log('增援归防','#'+s.id+' 返回'+SIDES[s.side]+'，沿途保持警戒。');}
+ }
  coordinate(force=false){
   const alive=this.living(),guards=alive.filter(s=>s.task!=='supply'),pressure=this.sidePressure(),plans=[];
+  this.updateFronts(pressure,alive);this.respondToFronts(alive,pressure);
+  const responding=alive.some(s=>s.reinforcement)||this.lanes.some(l=>l.state!=='guard');
   const priority=this.tactic.startsWith('reinforce_')?ACTIONS.indexOf(this.tactic)-1:-1;
   const weights=pressure.map((p,i)=>1+Math.min(p/10,.8)+(i===priority?2:0));
   const desired=[0,0,0,0];
   for(let i=0;i<alive.length;i++){let side=0;for(let j=1;j<4;j++)if((desired[j]+.8)/weights[j]<(desired[side]+.8)/weights[side])side=j;desired[side]++;}
   const counts=[0,0,0,0];for(const s of alive)counts[s.side]++;
   // Transfer the nearest available soldiers, never reshuffle the entire roster.
-  for(let n=0;n<(force?2:1);n++){
+  for(let n=0;n<(responding?0:force?2:1);n++){
    let side=-1;for(let i=0;i<4;i++)if(desired[i]>counts[i]&&(i===priority||counts[i]===0||desired[i]-counts[i]>=2||pressure[i]>3)&&(side<0||desired[i]-counts[i]>desired[side]-counts[side]))side=i;
    if(side<0)break;
    const candidates=guards.filter(s=>counts[s.side]>desired[s.side]&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&!this.handoffFor(s)&&!this.inTransit(s)&&this.time>=(s.maneuverUntil||0)&&this.canLeaveForSupply(s));
@@ -216,13 +269,7 @@ export class Game{
     const replacement=group.filter(s=>s.formationSlot>=2&&!WEAPONS[s.weapon].fixed&&s.reload<=0&&s.mag>0&&!this.inTransit(s)).sort((a,b)=>dist(a,gate)-dist(b,gate)||a.id-b.id)[0];
     if(replacement){slots.delete(replacement.formationSlot);replacement.formationSlot=vacancy;replacement.relief=true;slots.add(vacancy);}
    }
-   const lane=this.lanes[side]||(this.lanes[side]={depth:0,previous:0,since:this.time,holdUntil:0});
-   const intruders=this.enemies.filter(z=>z.hp>0&&z.side===side&&z.entered&&dist(z,CENTER)<68).length;
-   let depth=0;
-   if((this.tactic==='fallback'&&(pressure[side]>1||intruders))||intruders>=2)depth=intruders>=4?25:13;
-   else if(gate.hp/gate.max<.22&&pressure[side]>5)depth=10;
-   if(depth<lane.depth&&this.time<lane.holdUntil)depth=lane.depth;
-   if(depth!==lane.depth){lane.previous=lane.depth;lane.depth=depth;lane.since=this.time;lane.holdUntil=this.time+6;}
+   const lane=this.lanes[side];
    for(const s of group){
     const w=WEAPONS[s.weapon],slot=s.formationSlot;
     if(w.fixed&&s.mount){plans.push({s,point:s.mount,kind:'mount',priority:100,force:true});continue;}
@@ -232,15 +279,17 @@ export class Game{
     const settled=!this.inTransit(s);
     depthBase+=Math.floor(slot/2)*9+retreat+(s.reload>0&&settled?8:0);
     let offset=(slot%2?1:-1)*(Math.floor(slot/2)%2?9:4.5);
+    if(retreat>0)offset=Math.sign(offset)*Math.max(11,Math.abs(offset));
     if(s.localOffset&&(s.localOffset.until>this.time||pressure[side]>0))offset+=s.localOffset.amount;
     else s.localOffset=null;
     let point=s.localOffset?.point&&retreat===0?s.localOffset.point:this.formationPoint(side,depthBase,offset);
     if(this.blocked(point.x,point.y,UNIT_RADIUS+.2))point=this.formationPoint(side,depthBase+9,offset);
-    const kind=retreat>0?'retreat':s.reload>0&&settled?'reload':s.relief?'relief':s.localOffset?'reposition':'formation';
-    plans.push({s,point,kind,priority:retreat>0?80+retreat:kind==='relief'?35:kind==='reload'?30:kind==='reposition'?20:10});
+    const kind=lane.state==='recover'?'recover':retreat>0?'retreat':s.reinforcement?(s.reinforcement.returning?'restore':'reinforce'):s.reload>0&&settled?'reload':s.relief?'relief':s.localOffset?'reposition':'formation';
+    plans.push({s,point,kind,priority:kind==='recover'?25:retreat>0?80+retreat:kind==='reinforce'?45:kind==='restore'?25:kind==='relief'?35:kind==='reload'?30:kind==='reposition'?20:10});
    }
   }
   this.refreshTeams(alive);this.applyTeamPlans(plans);
+  for(const [side,lane] of this.lanes.entries())if(lane.recovering&&lane.depth===0&&this.time-lane.since>1.2&&plans.filter(p=>p.s.side===side&&p.kind!=='mount').every(p=>!this.inTransit(p.s)&&!this.needsPlan(p))){lane.recovering=false;lane.state='guard';lane.stateSince=this.time;}
   for(const s of guards){s.retreating=s.order?.kind==='retreat'&&this.inTransit(s);s.holdPoint={...(s.goal||s)};if(s.relief&&s.order?.kind==='relief'&&!this.inTransit(s))s.relief=false;}
  }
  refreshTeams(alive=this.living()){
@@ -267,7 +316,7 @@ export class Game{
   if(s.coop?.role!==role||s.coop?.partnerId!==partnerId||s.coop?.reason!==reason)s.coop={role,partnerId,reason,since:this.time};
   s.covering=role==='cover';
  }
- coverReady(s){return s.hp>0&&s.task!=='supply'&&s.mag>0&&s.reload<=0&&(!WEAPONS[s.weapon].fixed||!!s.mount)&&!this.inTransit(s)&&!s.nav?.yield&&this.los(s,this.gates[s.side]);}
+ coverReady(s){return !this.handoffFor(s)&&s.hp>0&&s.task!=='supply'&&s.mag>0&&s.reload<=0&&(!WEAPONS[s.weapon].fixed||!!s.mount)&&!this.inTransit(s)&&!s.nav?.yield&&this.los(s,this.gates[s.side]);}
  needsPlan({s,point,kind}){
   if(!s.goal)return true;
   if(this.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2))return true;
@@ -673,6 +722,7 @@ export class Game{
    const armorFit=(s.weapon==='m110'||s.weapon==='m2')?-z.armor*35:w.pierce<.2?z.armor*20:0;
    const cluster=w.blast?Math.min(4,targets.filter(a=>a!==z&&a.hp>0&&dist(a,z)<w.blast).length)*6:0;
    let v=d+(z.id===s.targetId?-9:0)+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0)-protect+armorFit-cluster;
+   if(z.inside&&(s.weapon==='benelli'||s.weapon==='mp5'))v-=Math.max(0,30-d)*1.2;
    if(z.side!==s.side&&!z.inside)v+=45;
    if(v<score){best=z;score=v;}
   }
@@ -883,6 +933,7 @@ export class Game{
  serialize(){const obj={...this};delete obj.aiProvider;obj.rng={state:this.rng.state};obj.events=[];return JSON.stringify(obj);}
  static restore(raw,aiProvider=null){
   const v=typeof raw==='string'?JSON.parse(raw):raw,g=Object.create(Game.prototype);Object.assign(g,v);g.rng=new RNG(1);g.rng.state=v.rng.state;g.aiProvider=aiProvider;g.events=[];
+  g.frontResponseAt??=-99;
   g.ammoHandoffs??=[];g.buddyTransfers??=0;
   g.projectiles??=[];g.lanes??=[];g.coordinationAge??=99;g.tacticChangedAt??=-99;g.tacticCandidate??=null;g.trafficMigration=!!g.trafficMigration||g.soldiers.some(s=>!s.nav);
   const oldTeams=!g.fireteams;g.fireteams??=[];g.nextTeamId??=1;g.teamRoster??='';
