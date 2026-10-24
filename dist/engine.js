@@ -1,4 +1,4 @@
-export const VERSION='0.6.0';
+export const VERSION='0.7.0';
 export const UNIT_RADIUS=3.3,UNIT_SPACE=9;
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
