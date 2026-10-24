@@ -1,4 +1,4 @@
-import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION} from './engine.js?v=0.3.0';
+import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION,MAP_PROFILES} from './engine.js?v=0.4.0';
 
 const $=id=>document.getElementById(id);
 const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -20,10 +20,34 @@ function coopDetail(s){
  const action=s.coop?.role==='cover'&&partner?`正在掩护 #${partner.id}${COOP_REASON[s.coop.reason]||'移动'}`:s.coop?.role==='move'&&partner?`由 #${partner.id} 掩护${COOP_REASON[s.coop.reason]||'移动'}`:s.coop?.role==='wait'&&partner?`留位警戒，等 #${partner.id} 到位`:'保持本组阵位';
  return `第 ${team.id} 组${mates?' · 搭档 '+mates:''}。${action}。`;
 }
+function ammoText(ammo){return Object.entries(ammo||{}).map(([type,qty])=>`${AMMO[type]} ${fmt(qty)}发`).join(' · ');}
+function choiceContext(){
+ const summary=game.loadoutSummary(),counts=Object.entries(summary.counts).map(([key,n])=>WEAPONS[key].name+' ×'+n).join(' · ');
+ return `<div class="choice-context"><b>${escape(summary.styles.join(' · '))}</b><span>${escape(counts)}</span>${summary.shortAmmo.length?'<small>补给偏紧：'+summary.shortAmmo.map(t=>escape(AMMO[t])).join(' · ')+'</small>':''}</div>`;
+}
+function payoutText(choice){
+ const payout=choice.payout;
+ if(payout?.kind==='ammo')return '完成据点：'+ammoText(payout.ammo);
+ if(payout?.kind==='rescue')return `完成据点：最多${payout.count}名M4A1队员，各携90发5.56；编制满时收下弹药。`;
+ if(payout?.kind==='armory'){const preview=game.loadoutPreview(payout.card);return '完成据点：'+payout.card.name+'，配套 '+ammoText(preview.ammo);}
+ return choice.flavor==='final'?'最终据点：消灭母体并撤离。':choice.flavor==='rescue'?'完成据点：接应2名步枪兵。':'完成据点：取得有限弹药。';
+}
+function rewardDetails(card){
+ if(card.kind==='weapon'||card.kind==='loadout'){
+  const preview=game.loadoutPreview(card),counts={...game.loadoutSummary().counts},keys=new Set();
+  for(const change of preview.changes){counts[change.from]=(counts[change.from]||0)-1;counts[change.to]=(counts[change.to]||0)+1;keys.add(change.to);}
+  const before=game.loadoutSummary().counts,impact=[...keys].map(key=>`${WEAPONS[key].role} ${before[key]||0}→${counts[key]}`).join(' · ');
+  const warning=preview.changes.some(change=>WEAPONS[change.from].fixed)?'将拆换固定火力。':'';
+  return `<p>${escape(card.notes||'按当前编制自动换装，优先选择步枪兵。')}</p><p class="reward-impact">${escape(warning+preview.changes.length+'人换装 · '+impact)}</p><p class="reward-ammo">附带 ${escape(ammoText(preview.ammo))}</p>`;
+ }
+ if(card.kind==='ammo'&&card.ammo)return `<p>${escape(card.description)}</p><p class="reward-ammo">${escape(ammoText(card.ammo))}</p>`;
+ if(card.kind==='recruits'){const n=Math.min(3,35-game.living().length);return `<p>${n}名M4A1步枪兵加入，携带${n*90}发5.56弹药。</p><p class="reward-impact">编制 ${game.living().length}→${game.living().length+n} / 35</p>`;}
+ return `<p>${escape(card.description)}</p>`;
+}
 const SAVE='weiwu-run-v1',RECORDS='weiwu-records-v1',SETTINGS='weiwu-settings-v1';
 let provider=null,meta=null,modelError=false,game,paused=false,speed=1,view={zoom:1.5,x:200,y:205},lastPhase='',lastPanel='',lastHud=0,lastSave=0,accumulator=0,lastFrame=0,recorded=false,poseTime=0;
 let runId=Date.now().toString(36),saved=null,settings={ai:true},storageOkay=true;
-try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
+try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.3.0','0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
 function toast(t){$('toast').textContent=t;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,2600);}
 function save(){if(game.phase==='home'||game.phase==='ended')return;try{localStorage.setItem(SAVE,JSON.stringify({version:VERSION,runId,state:JSON.parse(game.serialize())}));}catch{if(storageOkay){storageOkay=false;toast('浏览器未允许保存，本次行动仍可继续。');}}}
 function settingsSave(){try{localStorage.setItem(SETTINGS,JSON.stringify(settings));}catch{}}
@@ -55,7 +79,7 @@ $('model-info').onclick=modelInfo;$('ai-details').onclick=modelInfo;
 $('ammo').onclick=()=>{const inv=game.inventory();modal('全队弹药账本',`<p>共享库存与个人携弹分别计算。搬运必须实际往返；换弹只使用个人备用弹药。转移据点不会免费补弹。</p>${Object.keys(AMMO).map(t=>{const units=game.living().filter(s=>WEAPONS[s.weapon].ammo===t);const carry=units.reduce((n,s)=>n+s.mag+s.reserve,0),cargo=game.living().reduce((n,s)=>n+(s.supply?.type===t?s.supply.cargo:0),0);return `<div class="ammo-row"><div>${AMMO[t]}<small>携行 ${fmt(carry)} · 运输 ${cargo} · 已射 ${fmt(inv.fired[t])} · 遗失 ${fmt(inv.lost[t])}</small></div><strong>${fmt(game.stock[t])}<small>共享库存</small></strong></div>`;}).join('')}<p class="subtle">获取总量 = 当前库存 + 个人携弹 + 运输中 + 已射击 + 阵亡遗失。新兵携带的弹药也计入获取总量。</p>`);};
 $('team').onclick=()=>modal('队伍编制',`<p>${game.living().length} 名存活 · ${game.dead} 名阵亡 · 上限 35 人。点战场上的队员可以查看个人状态。</p>${Object.entries(WEAPONS).map(([k,w])=>{const units=game.living().filter(s=>s.weapon===k);return units.length?`<div class="team-row"><div><b style="color:${w.color}">${w.icon} · ${w.role}</b><small>${w.name} · ${w.mag}${w.belt?' 发弹链装载':' 发容量'}</small></div><strong>${units.length} 人</strong></div>`:'';}).join('')}<h3>小组与搭档</h3>${game.fireteams.map(t=>`<div class="team-row"><div><b>第 ${t.id} 组 · ${SIDES[t.side]}</b><small>${t.members.map(id=>'#'+id).join(' · ')}</small></div><span>${({moving:'交替移动',handoff:'接替掩护',support:'留位掩护',hold:'保持阵位'})[t.phase]||'保持阵位'}</span></div>`).join('')}<h3>自动分工</h3><p>没有专职补给兵。缺弹时临时挑选队员离开阵位，去中央库取弹，再送给相应队员。固定机枪操作手优先留在阵位。</p><p class="subtle">幸存者进入下一据点恢复生命；阵亡人员本局不会复活。新一局恢复初始编制。</p>`);
 $('history').onclick=()=>{const rs=records();modal('战绩档案',`<p>仅保留最近 30 次行动的战绩。没有永久数值、解锁或货币。</p>${rs.length?rs.map(r=>`<div class="record-row"><div><b style="color:${r.win?'var(--lime)':'var(--danger)'}">${r.win?'行动完成':'行动失败'}</b><small>${new Date(r.date).toLocaleDateString('zh-CN')} · 种子 ${r.seed}</small></div><div>${clock(r.time)} · 清除 ${r.kills}<small>存活 ${r.survivors} / 阵亡 ${r.dead}</small></div></div>`).join(''):'<p class="subtle">还没有完成的行动。</p>'}`);};
-$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。最终据点会出现母体。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹，青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
+$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。宽口仓库、近距住宅和开阔院落的入口、遮挡、接敌距离与门防不同。路线会预告主要压力方向及完成据点的回报。最终据点需要清剿母体并撤离。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>编制与军械</h3><p>波间三选一包含军械、补给、补员或防护训练。军械卡显示实际换装人数和配套弹药，系统优先从步枪兵换装；有可用步枪兵时保留专长和固定火力。重复选择相应军械，可逐渐形成火力支援、精确射击或近距防守编制。军械使用手册中的弹种、弹匣容量和射程；弹药仍需实际搬运。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹，青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
 
 function render(force=false){
  document.querySelector('footer span').textContent='围屋行动 / '+VERSION;
@@ -74,7 +98,7 @@ function render(force=false){
  $('objective-label').textContent=game.node?.mode==='hold'?'核心防御':'据点核心';
  const status={home:'待命',route:'选择路线',reward:'补给整备',combat:paused?'暂停':'自动交战',ended:game.result?.win?'行动完成':'行动结束'};
  $('battle-status').textContent=status[game.phase];$('live-dot').classList.toggle('active',game.phase==='combat'&&!paused);
- $('wave-label').textContent=game.wave?`第 ${game.wave} / 2 波 · ${game.node?.mode==='hold'?'限时坚守':'清剿'}`:'小球模拟 / 俯视战场';
+ $('wave-label').textContent=game.wave?`第 ${game.wave} / 2 波 · ${game.node?.mode==='hold'?'限时坚守':'清剿'}${game.map.terrain?' · '+game.map.terrain.tag:''}`:'小球模拟 / 俯视战场';
  const panelKey=game.phase+'-'+game.nodeIndex+'-'+game.wave+'-'+game.choices.map(c=>c.id).join();
  if(force||panelKey!==lastPanel){renderPanel();lastPanel=panelKey;}
  if(game.phase==='combat'){const remaining=game.enemies.filter(z=>z.hp>0).length+game.remaining;$('combat-goal')?.replaceChildren(document.createTextNode(game.node.mode==='hold'?clock(Math.max(0,game.holdDuration-game.waveTime)):String(remaining)));const carriers=game.living().filter(s=>s.task==='supply').length;if($('carrier-count'))$('carrier-count').textContent=carriers;if($('combat-event')){const log=game.logs[0];$('combat-event').innerHTML=`<time>${clock(log?.time||0)}</time><b>${escape(log?.title||'队伍就位')}</b><br>${escape(log?.text||'')}`;}}
@@ -87,8 +111,8 @@ const routeSvg='<svg class="route-symbol" viewBox="0 0 24 24" aria-hidden="true"
 function renderPanel(){
  const p=$('decision-panel');
  if(game.phase==='home'){p.innerHTML='<div class="waiting"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 28 8v9c0 7-12 12-12 12S4 24 4 17V8Z"/><path d="m10 16 4 4 8-9"/></svg><div><b>有限弹药，真实分工</b>观察队员搬弹、换装与四向防守。波间做决定，把队伍带到最后。</div></div>';return;}
- if(game.phase==='route'){p.innerHTML=`<div class="panel-title"><h2>选择下一据点</h2><span>路线 ${game.nodeIndex+2} / 4 · 二选一</span></div><div class="route-choices">${game.choices.map((c,i)=>`<button class="route-card" data-route="${c.id}"><span class="route-number">ROUTE / 0${i+1}</span>${routeSvg}<h3>${c.name}</h3><div class="tags"><span class="tag">${c.mode==='hold'?'限时坚守':'清剿'}</span>${c.danger?'<span class="tag risk">压力较高</span>':'<span class="tag">常规威胁</span>'}</div><p>${c.description}</p><span class="route-reward">${c.reward}<b>↗</b></span></button>`).join('')}</div>`;return;}
- if(game.phase==='reward'){p.innerHTML=`<div class="panel-title"><h2>战地整备 · 选择奖励</h2><span>三选一 · ${game.wave===2?'前往下一据点':'进入下一波'}</span></div><div class="reward-choices">${game.choices.map(c=>`<button class="reward-card" data-reward="${c.id}"><span class="reward-icon">${c.icon}</span><div class="reward-copy"><div><h3>${escape(c.name)}</h3><span class="tag">${c.tag}</span></div><p>${escape(c.description)}</p></div><span class="card-arrow">↗</span></button>`).join('')}</div>`;return;}
+ if(game.phase==='route'){p.innerHTML=`<div class="panel-title"><h2>选择下一据点</h2><span>路线 ${game.nodeIndex+2} / 4 · 二选一</span></div>${choiceContext()}<div class="route-choices">${game.choices.map((c,i)=>{const profile=MAP_PROFILES[c.template];return `<button class="route-card" data-route="${c.id}"><span class="route-number">ROUTE / 0${i+1}</span>${routeSvg}<h3>${escape(c.name)}</h3><div class="tags"><span class="tag">${c.mode==='hold'?'限时坚守':'清剿'}</span><span class="tag">${escape(c.terrain||profile?.tag||'四向据点')}</span>${c.danger?'<span class="tag risk">尸群较密</span>':''}</div><p>${escape(c.description||profile?.description||'完成据点目标，取得补给。')}</p><span class="route-front">主要压力：${c.fronts?.length?c.fronts.map(side=>SIDES[side]).join(' / '):'四向来敌'}</span><p class="route-payout">${escape(payoutText(c))}</p><span class="route-reward">${escape(c.reward)}<b>↗</b></span></button>`;}).join('')}</div>`;return;}
+ if(game.phase==='reward'){p.innerHTML=`<div class="panel-title"><h2>战地整备 · 选择奖励</h2><span>三选一 · ${game.wave===2?'前往下一据点':'进入下一波'}</span></div>${choiceContext()}<div class="reward-choices">${game.choices.map(c=>`<button class="reward-card" data-reward="${c.id}"><span class="reward-icon">${c.icon}</span><div class="reward-copy"><div><h3>${escape(c.name)}</h3><span class="tag">${c.tag}</span></div>${rewardDetails(c)}</div><span class="card-arrow">↗</span></button>`).join('')}</div>`;return;}
  if(game.phase==='combat'){p.innerHTML=`<div class="panel-title"><h2>自动交战中</h2><span>波间选择升级</span></div><div class="combat-strip"><span class="combat-chip">${game.node.mode==='hold'?'守住剩余':'待清除'}<b id="combat-goal">—</b></span><span class="combat-chip">搬弹队员<b id="carrier-count">0</b></span><span class="combat-chip">完成运输<b>${game.supplyRuns}</b></span></div><div class="event-line" id="combat-event"></div>`;return;}
  if(game.phase==='ended'){const r=game.result;p.innerHTML=`<div class="end-panel"><span class="eyebrow">${r.win?'OPERATION COMPLETE':'OPERATION ENDED'}</span><h2>${r.win?'最后一道门，守住了。':'行动止步于此。'}</h2><p>${r.reason}。${r.win?'幸存队员已安全撤离。':'新的行动会恢复初始队伍与装备。'}</p><div class="end-stats"><div><small>行动用时</small><strong>${clock(r.time)}</strong></div><div><small>清除目标</small><strong>${r.kills}</strong></div><div><small>存活 / 阵亡</small><strong>${r.survivors} / ${r.dead}</strong></div></div><div class="end-actions"><button class="primary" data-new>新行动 <span>↗</span></button><button class="secondary" data-retry>相同种子再试</button></div><p class="subtle">已保存战绩 · 种子 ${r.seed} · 搬弹 ${r.supplyRuns} 次 · 模型决策 ${r.neuralDecisions} 次</p></div>`;}
 }
@@ -107,15 +131,15 @@ function draw(){
  for(let i=0;i<65;i++){const x=(i*79.31+21)%400,y=(i*123.77+42)%400;if(x>110&&x<290&&y>110&&y<300)continue;const n=i%5;if(n<3){circle(x,y,1.4+n,'#1a293b');circle(x+1.6,y-.7,1.5,'#213247');}else{rect(x,y,3+n,1.6,'#263548');}}
  const map=game.map,h=map.house;
  // The four approach tracks give the crowd a visible direction.
- [[200,0,200,134],[270,205,400,205],[200,276,200,400],[0,205,129,205]].forEach(a=>line(...a,'#1c293c',13));
+ [[200,0,200,134],[270,205,400,205],[200,276,200,400],[0,205,129,205]].forEach((a,i)=>line(...a,'#1c293c',(game.gates[i].width||16)*.8));
  rect(h.x+3,h.y+4,h.w,h.h,'#141e1466');rect(h.x,h.y,h.w,h.h,'#1c2a3e');
  for(let i=h.x+10;i<h.x+h.w;i+=10)line(i,h.y+3,i,h.y+h.h-3,'#233247',.5);
  for(let i=h.y+10;i<h.y+h.h;i+=10)line(h.x+3,i,h.x+h.w-3,i,'#233247',.5);
  rect(h.x+6,h.y+6,h.w-12,h.h-12,null,'#48617c33');
  for(const c of map.crates){rect(c.x+1.5,c.y+2,c.w,c.h,'#1b241b66');rect(c.x,c.y,c.w,c.h,'#344457','#52647a');line(c.x,c.y,c.x+c.w,c.y+c.h,'#52647a',.6);line(c.x+c.w,c.y,c.x,c.y+c.h,'#52647a',.6);}
  for(const w of map.walls){rect(w.x+1,w.y+1,w.w,w.h,'#1b2218');rect(w.x,w.y,w.w,w.h,'#778ba4');}
- for(const g of game.gates){const p=g.hp/g.max,vertical=g.side===1||g.side===3;ctx.lineWidth=1;
-  if(p>0){rect(g.x-(vertical?1:7),g.y-(vertical?7:1),vertical?2:14,vertical?14:2,p<.3?'#cc9070':'#a7ac7b');for(let j=-5;j<7;j+=3)if(vertical)line(g.x-1,g.y+j,g.x+1,g.y+j,'#576340',.4);else line(g.x+j,g.y-1,g.x+j,g.y+1,'#576340',.4);}
+ for(const g of game.gates){const p=g.hp/g.max,vertical=g.side===1||g.side===3,span=(g.width||16)-2,half=span/2;ctx.lineWidth=1;
+  if(p>0){rect(g.x-(vertical?1:half),g.y-(vertical?half:1),vertical?2:span,vertical?span:2,p<.3?'#cc9070':'#a7ac7b');for(let j=-half+2;j<half;j+=3)if(vertical)line(g.x-1,g.y+j,g.x+1,g.y+j,'#576340',.4);else line(g.x+j,g.y-1,g.x+j,g.y+1,'#576340',.4);}
   else{for(let j=0;j<3;j++)rect(g.x-5+j*4,g.y+2-j,3,1,'#9b8562');}
   const bx=vertical?g.x+(g.side===1?8:-18):g.x-8,by=vertical?g.y-11:g.y+(g.side===0?-9:7);
   rect(bx,by,16,1.6,'#263020');rect(bx,by,16*p,1.6,p<.3?'#d49776':'#adc18a');
