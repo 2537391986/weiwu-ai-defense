@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {Game,WEAPONS,ACTIONS,UNIT_RADIUS,UNIT_SPACE} from '../dist/engine.js';
+import {Game,WEAPONS,ACTIONS,UNIT_RADIUS,UNIT_SPACE,ENEMY_PROFILES} from '../dist/engine.js';
 import {CombatFeedback,BattleAudio} from '../dist/feedback.js';
 import {inferPolicy,AI_META} from '../dist/ai-model.js';
 
@@ -53,9 +53,10 @@ test('a threatened group withdraws under cover, then hands cover to the first ar
  g.time+=1.3;g.coordinate();assert.equal(north.filter(s=>g.inTransit(s)).length,1,'the next element waits for arrival, rather than a fixed short timer');
  assert.deepEqual({x:cover.x,y:cover.y},coverPosition);
  let handedOver=false;const moved=new Set([first.id]);
- for(let i=0;i<600;i++){
+ // A front-line close-range soldier may require a walking detour for the following rifleman.
+ for(let i=0;i<900;i++){
   g.time+=1/30;for(const s of g.living())g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();
-  assert.ok(north.filter(s=>g.inTransit(s)).length<=1,'one ordinary move at a time within the group');
+  assert.ok(north.filter(s=>g.inTransit(s)&&!s.nav?.yield).length<=1,'one ordinary move at a time within the group');
   for(const s of north)if(g.inTransit(s)&&s.order?.kind==='retreat')moved.add(s.id);
   if(first.coop?.role==='cover'&&first.coop.partnerId!==first.id)handedOver=true;
  }
@@ -194,7 +195,7 @@ test('a covering teammate stays at their position and actually fires while their
 });
 
 test('a rear defender replaces a fallen front soldier while their remaining buddy covers',()=>{
- const g=active(),front=g.soldiers[0],rear=g.soldiers[8],buddy=g.soldiers[4],quiet=g.living().filter(s=>s.side!==0),positions=quiet.map(s=>[s.x,s.y]);
+ const g=active(),north=g.living().filter(s=>s.side===0),front=north.find(s=>s.formationSlot===0),rear=north.find(s=>s.formationSlot===2),buddy=north.find(s=>s!==front&&s!==rear),quiet=g.living().filter(s=>s.side!==0),positions=quiet.map(s=>[s.x,s.y]);
  const oldRear={x:rear.x,y:rear.y},buddyPosition={x:buddy.x,y:buddy.y};front.hp=0;g.killSoldier(front);g.coordinate();
  assert.equal(rear.formationSlot,0);assert.equal(rear.order.kind,'relief');assert.equal(buddy.coop.role,'cover');assert.equal(buddy.coop.partnerId,rear.id);
  assert.deepEqual({x:buddy.x,y:buddy.y},buddyPosition);
@@ -492,4 +493,39 @@ test('background and pause stop sound, while a resume gesture reuses the context
 });
 test('unavailable or blocked sound resolves safely without starting voices',async()=>{
  for(const factory of [()=>null,()=>{throw new Error('unsupported');},()=>fakeAudio({blocked:true})]){const a=new BattleAudio({contextFactory:factory});a.setEnabled(true);assert.equal(await a.unlock(),false);assert.equal(a.error,true);a.setActive(true);assert.deepEqual(a.playBatch([{type:'blast'}]),[]);assert.equal(a.voices.size,0);}
+});
+
+test('route enemy forecasts use the same eligible pool as actual spawns',()=>{
+ for(const profile of ['mixed','rush','armored']){
+  const g=active(71);g.nodeIndex=1;g.node.enemyProfile=profile;const counts={};for(let i=0;i<600;i++){const z=g.spawnEnemy(null,0);counts[z.kind]=(counts[z.kind]||0)+1;assert.ok(g.enemyPool().includes(z.kind));}
+  if(profile==='rush'){assert.equal(counts.heavy,undefined);assert.ok(counts.runner>200);}if(profile==='armored')assert.ok(counts.heavy>150);
+ }
+ const g=new Game({seed:71});for(let stage=0;stage<4;stage++){g.nodeIndex=stage-1;for(const choice of g.routeChoices()){assert.ok(ENEMY_PROFILES[choice.enemyProfile]);if(stage===0)assert.ok(!g.enemyPool(choice,stage).includes('heavy'));if(stage===3)assert.equal(choice.enemyProfile,'mixed');}}
+});
+test('terrain deployment favours existing close groups in houses and long-range groups in yards without splitting partners',()=>{
+ const source=new Game({seed:71});source.applyLoadout(source.packageCard('close'));source.applyLoadout(source.packageCard('precision'));source.phase='route';const teams=source.fireteams.map(t=>({id:t.id,members:[...t.members].sort((a,b)=>a-b)}));
+ const house=Game.restore(source.serialize()),yard=Game.restore(source.serialize());for(const [g,template] of [[house,'house'],[yard,'yard']]){g.enterNode({template,mode:'clear',name:template,fronts:[0,2],enemyProfile:'mixed'});assert.deepEqual(g.fireteams.map(t=>({id:t.id,members:[...t.members].sort((a,b)=>a-b)})),teams);assert.ok([0,1,2,3].every(side=>g.living().some(s=>s.side===side)));spaced(g.living());accounting(g);}
+ const fronts=g=>g.living().filter(s=>[0,2].includes(s.side)),close=g=>fronts(g).filter(s=>['benelli','mp5'].includes(s.weapon)).length,precision=g=>fronts(g).filter(s=>s.weapon==='m110').length;
+ assert.ok(close(house)>close(yard),'the house reserves its main entrances for the close group');assert.ok(precision(yard)>precision(house),'the yard places precision shooters on the advertised front');
+});
+test('close soldiers deploy ahead of their rifle partners with a clear entrance firing lane',()=>{
+ const g=new Game({seed:71});g.start();g.enterNode({template:'house',mode:'clear',name:'house',fronts:[0,2]});
+ for(const side of [0,2]){const units=g.living().filter(s=>s.side===side),close=units.find(s=>s.weapon==='benelli'),rifle=units.filter(s=>s.weapon==='m4');assert.ok(close&&rifle.length);const depth=s=>side===0?s.y-g.gates[side].y:g.gates[side].y-s.y;assert.ok(rifle.every(s=>depth(s)>depth(close)));assert.ok(g.los(close,g.gates[side]));}spaced(g.living());accounting(g);
+});
+test('focused supplies trade calibre coverage for quantity and still require physical carriage',()=>{
+ const g=active(),balanced=g.ammoPackage(),focus=g.focusedAmmoCards().find(c=>c.ammo.n556);assert.ok(focus);assert.equal(focus.ammo.n556,balanced.n556*1.5);assert.deepEqual(Object.keys(focus.ammo),['n556']);
+ const carried=g.living().map(s=>[s.mag,s.reserve]),stock={...g.stock},before={...g.acquired};g.phase='reward';g.wave=1;g.choices=[focus];assert.equal(g.chooseReward(focus.id),true);assert.equal(g.chooseReward(focus.id),false);assert.equal(g.stock.n556-stock.n556,900);assert.equal(g.stock.shell,stock.shell);assert.equal(g.acquired.n556-before.n556,900);assert.deepEqual(g.living().map(s=>[s.mag,s.reserve]),carried);accounting(g);
+});
+test('a single shortage can draft its focused box while a mono-calibre squad has no redundant focused choice',()=>{
+ const g=active();for(const s of g.living().filter(s=>s.weapon==='benelli'))burn(g,s);g.lost.shell+=g.stock.shell;g.stock.shell=0;assert.deepEqual(g.shortAmmoTypes(),['shell']);const cards=g.rewardChoices();assert.ok(cards.some(c=>c.id==='ammo-shell'));assert.equal(new Set(cards.map(c=>c.id)).size,3);accounting(g);
+ const mono=new Game({seed:71});for(const s of mono.living()){burn(mono,s);s.weapon='m4';mono.takeAmmo(s,90);}assert.deepEqual(mono.focusedAmmoCards(),[]);accounting(mono);
+});
+test('route and reward advice is deterministic, reports real new calibres and consumes no inventory or randomness',()=>{
+ const g=active(),before=g.serialize();assert.match(g.rewardAdvice(g.packageCard('precision')),/新增 7.62/);assert.match(g.rewardAdvice(g.packageCard('support')),/5.56.*共用/);assert.ok(g.routeAdvice({template:'house',enemyProfile:'rush'}).some(t=>t.includes('近距')));assert.ok(g.routeAdvice({template:'yard',enemyProfile:'armored'}).some(t=>t.includes('重型')));assert.equal(g.serialize(),before);
+});
+test('focused route caches retain the promised quantities after a later weapon change and pay out once',()=>{
+ const g=active();g.nodeIndex=0;const choice=g.routeChoices()[0];assert.equal(choice.payout.kind,'ammo');assert.equal(Object.keys(choice.payout.ammo).length,1);const promised=structuredClone(choice.payout.ammo);g.phase='route';g.enterNode(choice);g.applyLoadout(g.packageCard('precision'));const before={...g.acquired};g.wave=2;g.finishWave();g.finishWave();for(const type of Object.keys(before))assert.equal(g.acquired[type]-before[type],promised[type]||0);accounting(g);
+});
+test('old route choices and combat maps remain intact and keep the legacy enemy mix',()=>{
+ const g=active(),raw=JSON.parse(g.serialize());delete raw.node.enemyProfile;raw.phase='route';raw.choices=g.routeChoices();for(const choice of raw.choices)delete choice.enemyProfile;const h=Game.restore(raw,inferPolicy),before=h.inventory(),map=structuredClone(h.map),choices=structuredClone(h.choices);assert.deepEqual(h.choices,choices);assert.deepEqual(h.map,map);assert.deepEqual(h.enemyPool(h.node,1),['walker','walker','walker','runner','heavy']);assert.deepEqual(h.inventory(),before);accounting(h);
 });
