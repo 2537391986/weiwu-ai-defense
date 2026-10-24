@@ -13,3 +13,7 @@ body{background:#0b111d}.app{padding:0 14px;box-shadow:0 0 80px #0004}.topbar{pa
 
 /* 0.7 optional battle sound control */
 .sound-strip{display:flex;align-items:center;gap:10px;padding:0 0 12px;color:var(--muted);font-size:9px}.sound-button{border:1px solid var(--line);border-radius:3px;min-height:34px;padding:6px 11px;font-size:10px;color:var(--muted)}.sound-button[aria-pressed=true]{color:var(--lime);background:var(--surface);border-color:#6d927d}
+
+/* 0.8 loadout and route tradeoffs */
+.route-card p.route-enemies{font-size:9px;color:#c7b6d9;margin:5px 0 8px}.route-card p.route-advice{font-size:9px;line-height:1.8;color:#a5c9bf;border-top:1px solid #33485b;padding-top:8px;margin:0 0 12px}.reward-copy p.reward-tradeoff{color:#b5a8cc;font-size:9px;line-height:1.7;margin-top:5px}.route-card{min-height:310px}
+@media(max-width:440px){.route-choices{grid-template-columns:1fr}.route-card{min-height:0;padding:14px}.route-card h3{font-size:17px;margin:8px 0}.route-card p,.route-card p.route-enemies,.route-card p.route-advice,.route-card p.route-payout,.route-front{font-size:11px;line-height:1.75}.route-card .route-reward{font-size:11px;margin-top:5px}.route-card .tag{font-size:9px}.reward-copy p.reward-tradeoff{font-size:10px}}
