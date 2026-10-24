@@ -1,4 +1,5 @@
-import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION,MAP_PROFILES} from './engine.js?v=0.6.0';
+import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION,MAP_PROFILES} from './engine.js?v=0.7.0';
+import {CombatFeedback,BattleAudio,WEAPON_POSES,reloadPose} from './feedback.js?v=0.7.0';
 
 const $=id=>document.getElementById(id);
 const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -51,29 +52,32 @@ function rewardDetails(card){
 }
 const SAVE='weiwu-run-v1',RECORDS='weiwu-records-v1',SETTINGS='weiwu-settings-v1';
 let provider=null,meta=null,modelError=false,game,paused=false,speed=1,view={zoom:1.5,x:200,y:205},lastPhase='',lastPanel='',lastHud=0,lastSave=0,accumulator=0,lastFrame=0,recorded=false,poseTime=0;
-let runId=Date.now().toString(36),saved=null,settings={ai:true},storageOkay=true;
-try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.5.0','0.4.0','0.3.0','0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
+let runId=Date.now().toString(36),saved=null,settings={ai:true,sound:false},storageOkay=true;
+try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.6.0','0.5.0','0.4.0','0.3.0','0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
+const feedback=new CombatFeedback(),audio=new BattleAudio();let visualFX=[];audio.setEnabled(settings.sound);
 function toast(t){$('toast').textContent=t;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,2600);}
 function save(){if(game.phase==='home'||game.phase==='ended')return;try{localStorage.setItem(SAVE,JSON.stringify({version:VERSION,runId,state:JSON.parse(game.serialize())}));}catch{if(storageOkay){storageOkay=false;toast('浏览器未允许保存，本次行动仍可继续。');}}}
 function settingsSave(){try{localStorage.setItem(SETTINGS,JSON.stringify(settings));}catch{}}
 function records(){try{return JSON.parse(localStorage.getItem(RECORDS)||'[]');}catch{return [];}}
 function record(){if(recorded)return;recorded=true;try{const r=records();if(!r.some(x=>x.id===runId))r.unshift({...game.result,id:runId,date:new Date().toISOString()});localStorage.setItem(RECORDS,JSON.stringify(r.slice(0,30)));localStorage.removeItem(SAVE);}catch{}saved=null;}
-function newGame(seed){game=new Game({seed:seed??crypto.getRandomValues(new Uint32Array(1))[0],aiEnabled:settings.ai,aiProvider:provider});runId=Date.now().toString(36);paused=false;recorded=false;view={zoom:1.5,x:200,y:205};lastPhase='';lastPanel='';accumulator=0;render(true);}
+function newGame(seed){game=new Game({seed:seed??crypto.getRandomValues(new Uint32Array(1))[0],aiEnabled:settings.ai,aiProvider:provider});feedback.reset(game);visualFX=[];audio.stop();runId=Date.now().toString(36);paused=false;recorded=false;view={zoom:1.5,x:200,y:205};lastPhase='';lastPanel='';accumulator=0;render(true);}
 newGame();
 if(saved)$('resume').hidden=false;
 import('./ai-model.js').then(m=>{provider=m.inferPolicy;meta=m.AI_META;game.attachAI(provider);game.decisionAge=99;render(true);}).catch(()=>{modelError=true;render(true);});
 
 $('start').onclick=()=>{game.start();saved=null;$('resume').hidden=true;save();render(true);};
-$('resume').onclick=()=>{try{game=Game.restore(saved.state,provider);runId=saved.runId;settings.ai=game.aiEnabled;paused=game.phase==='combat';game.decisionAge=99;recorded=false;lastPhase='';lastPanel='';render(true);toast(game.phase==='combat'?'存档已恢复，点击继续战斗。':'上次行动已恢复。');}catch{toast('存档无法恢复，请开始新行动。');}};
-$('pause').onclick=()=>{if(game.phase!=='combat')return;paused=!paused;save();render(true);};
+$('resume').onclick=()=>{try{game=Game.restore(saved.state,provider);feedback.reset(game);visualFX=[];audio.stop();runId=saved.runId;settings.ai=game.aiEnabled;paused=game.phase==='combat';game.decisionAge=99;recorded=false;lastPhase='';lastPanel='';render(true);toast(game.phase==='combat'?'存档已恢复，点击继续战斗。':'上次行动已恢复。');}catch{toast('存档无法恢复，请开始新行动。');}};
+$('pause').onclick=()=>{if(game.phase!=='combat')return;paused=!paused;if(paused)audio.setActive(false);save();render(true);};
 $('resume-battle').onclick=()=>{paused=false;render(true);};
 document.querySelectorAll('[data-speed]').forEach(b=>b.onclick=()=>{speed=Number(b.dataset.speed);document.querySelectorAll('[data-speed]').forEach(x=>x.classList.toggle('selected',x===b));});
 $('ai-toggle').onclick=()=>{settings.ai=!game.aiEnabled;game.setAI(settings.ai);settingsSave();if(game.phase==='combat')game.decide();save();render(true);toast(settings.ai?'AI 战术模型已启用':'已切换为常规规则策略');};
+document.addEventListener('click',()=>{if(settings.sound&&audio.context?.state!=='running')void audio.unlock();},{capture:true});
+if($('sound-toggle'))$('sound-toggle').onclick=async()=>{settings.sound=!settings.sound;audio.setEnabled(settings.sound);if(settings.sound&&!await audio.unlock()){settings.sound=false;audio.setEnabled(false);toast('声音暂未启用，可继续静音游玩。');}settingsSave();render(true);};
 $('zoom-in').onclick=()=>zoom(1);$('zoom-out').onclick=()=>zoom(-1);
 function zoom(dir){view.zoom=Math.max(1,Math.min(2.5,view.zoom+dir*.5));if(view.zoom===1)view.x=view.y=200;$('zoom-label').textContent=view.zoom+'×';}
 $('decision-panel').onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.route){const c=game.choices.find(x=>x.id===b.dataset.route);if(c){game.enterNode(c);paused=false;save();render(true);scrollTo({top:0,behavior:'smooth'});}}if(b.dataset.reward){game.chooseReward(b.dataset.reward);if(game.phase==='combat')paused=false;save();render(true);if(game.phase==='combat')scrollTo({top:0,behavior:'smooth'});}if(b.dataset.new!==undefined){newGame();game.start();save();render(true);}if(b.dataset.retry!==undefined){const seed=game.seed;newGame(seed);game.start();save();render(true);}};
 
-function modal(title,body){$('modal-title').textContent=title;$('modal-body').innerHTML=body;if(!$('modal').open){modal.wasPaused=paused;paused=true;$('modal').showModal();}render(true);}
+function modal(title,body){$('modal-title').textContent=title;$('modal-body').innerHTML=body;if(!$('modal').open){modal.wasPaused=paused;paused=true;audio.setActive(false);$('modal').showModal();}render(true);}
 $('modal-close').onclick=()=>$('modal').close();
 $('modal').addEventListener('close',()=>{paused=!!modal.wasPaused;render(true);});
 $('modal').addEventListener('click',e=>{if(e.target===$('modal')){const r=$('modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('modal').close();}});
@@ -84,9 +88,10 @@ $('model-info').onclick=modelInfo;$('ai-details').onclick=modelInfo;
 $('ammo').onclick=()=>{const inv=game.inventory();modal('全队弹药账本',`<p>共享库存与个人携弹分别计算。搬运必须实际往返；换弹只使用个人备用弹药。转移据点不会免费补弹。</p>${Object.keys(AMMO).map(t=>{const units=game.living().filter(s=>WEAPONS[s.weapon].ammo===t);const carry=units.reduce((n,s)=>n+s.mag+s.reserve,0),cargo=game.living().reduce((n,s)=>n+(s.supply?.type===t?s.supply.cargo:0),0);return `<div class="ammo-row"><div>${AMMO[t]}<small>携行 ${fmt(carry)} · 运输 ${cargo} · 已射 ${fmt(inv.fired[t])} · 遗失 ${fmt(inv.lost[t])}</small></div><strong>${fmt(game.stock[t])}<small>共享库存</small></strong></div>`;}).join('')}<p class="subtle">获取总量 = 当前库存 + 个人携弹 + 运输中 + 已射击 + 阵亡遗失。新兵携带的弹药也计入获取总量。</p>`);};
 $('team').onclick=()=>modal('队伍编制',`<p>${game.living().length} 名存活 · ${game.dead} 名阵亡 · 上限 35 人。点战场上的队员可以查看个人状态。</p>${Object.entries(WEAPONS).map(([k,w])=>{const units=game.living().filter(s=>s.weapon===k);return units.length?`<div class="team-row"><div><b style="color:${w.color}">${w.icon} · ${w.role}</b><small>${w.name} · ${w.mag}${w.belt?' 发弹链装载':' 发容量'}</small></div><strong>${units.length} 人</strong></div>`:'';}).join('')}<h3>小组与搭档</h3>${game.fireteams.map(t=>`<div class="team-row"><div><b>第 ${t.id} 组 · ${SIDES[t.side]}</b><small>${t.members.map(id=>'#'+id).join(' · ')}</small></div><span>${({moving:'交替移动',handoff:'接替掩护',support:'留位掩护',hold:'保持阵位'})[t.phase]||'保持阵位'}</span></div>`).join('')}<h3>自动分工</h3><p>没有专职补给兵。缺弹时临时挑选队员离开阵位，去中央库取弹，再送给相应队员。固定机枪操作手优先留在阵位。</p><p class="subtle">幸存者进入下一据点恢复生命；阵亡人员本局不会复活。新一局恢复初始编制。</p>`);
 $('history').onclick=()=>{const rs=records();modal('战绩档案',`<p>仅保留最近 30 次行动的战绩。没有永久数值、解锁或货币。</p>${rs.length?rs.map(r=>`<div class="record-row"><div><b style="color:${r.win?'var(--lime)':'var(--danger)'}">${r.win?'行动完成':'行动失败'}</b><small>${new Date(r.date).toLocaleDateString('zh-CN')} · 种子 ${r.seed}</small></div><div>${clock(r.time)} · 清除 ${r.kills}<small>存活 ${r.survivors} / 阵亡 ${r.dead}</small></div></div>`).join(''):'<p class="subtle">还没有完成的行动。</p>'}`);};
-$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。宽口仓库、近距住宅和开阔院落的入口、遮挡、接敌距离与门防不同。路线会预告主要压力方向及完成据点的回报。最终据点需要清剿母体并撤离。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>编制与军械</h3><p>波间三选一包含军械、补给、补员或防护训练。军械卡显示实际换装人数和配套弹药，系统优先从步枪兵换装；有可用步枪兵时保留专长和固定火力。重复选择相应军械，可逐渐形成火力支援、精确射击或近距防守编制。军械使用手册中的弹种、弹匣容量和射程；弹药仍需实际搬运。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹；近旁同型武器队员可递出备用弹，递弹需短暂停火且不消耗仓库库存。队员会趁空档错峰换弹。青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。入口告急时显示橙色提示，邻近队员按余力增援；破门后交替退到内侧，压力解除后逐段恢复。中央保留搬弹空间。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
+$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。宽口仓库、近距住宅和开阔院落的入口、遮挡、接敌距离与门防不同。路线会预告主要压力方向及完成据点的回报。最终据点需要清剿母体并撤离。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>编制与军械</h3><p>波间三选一包含军械、补给、补员或防护训练。军械卡显示实际换装人数和配套弹药，系统优先从步枪兵换装；有可用步枪兵时保留专长和固定火力。重复选择相应军械，可逐渐形成火力支援、精确射击或近距防守编制。军械使用手册中的弹种、弹匣容量和射程；弹药仍需实际搬运。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹；近旁同型武器队员可递出备用弹，递弹需短暂停火且不消耗仓库库存。队员会趁空档错峰换弹。青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。入口告急时显示橙色提示，邻近队员按余力增援；破门后交替退到内侧，压力解除后逐段恢复。中央保留搬弹空间。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>声音与武器动作</h3><p>战场下方可独立开关枪声、换弹声和命中声，默认关闭。暂停、查看面板或切到后台时静音。枪声由浏览器合成，用来区分武器节奏；不是实枪录音。机枪有弹链箱与支架，精确步枪有瞄具，换弹时可看到取弹、装入和复位动作。</p><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
 
 function render(force=false){
+ if($('sound-toggle')){$('sound-toggle').setAttribute('aria-pressed',String(!!settings.sound));$('sound-toggle').setAttribute('aria-label',settings.sound?'关闭战斗音效':'开启战斗音效');$('sound-toggle').textContent=settings.sound?'♫ 音效 开':'♩ 音效 关';}
  document.querySelector('footer span').textContent='围屋行动 / '+VERSION;
  $('home-overlay').hidden=game.phase!=='home';$('pause-overlay').hidden=!(paused&&game.phase==='combat'&&!$('modal').open);$('pause').disabled=game.phase!=='combat';$('pause').textContent=paused?'▶':'Ⅱ';$('pause').setAttribute('aria-label',paused?'继续战斗':'暂停战斗');
  $('ai-toggle').setAttribute('aria-checked',String(game.aiEnabled));$('model-badge-text').textContent=meta?(game.aiEnabled?'自动指挥':'规则指挥'):modelError?'规则模式':'AI 载入中';
@@ -168,19 +173,30 @@ function draw(){
  const markedTeams=activeGroups().slice(0,2),marked=new Set(markedTeams.flatMap(t=>[t.coverId,t.moverId].filter(Boolean))),tagPositions=[];
  for(const team of markedTeams){const mover=units.find(s=>s.id===team.moverId);if(!mover?.goal||Math.hypot(mover.x-mover.goal.x,mover.y-mover.goal.y)<5)continue;const p=mover.goal;for(const sign of [-1,1]){line(p.x+sign*3,p.y-3,p.x+sign*3,p.y-1,'#66bfb388',.55);line(p.x+sign*3,p.y-3,p.x+sign,p.y-3,'#66bfb388',.55);}}
  for(const s of units){
-  const w=WEAPONS[s.weapon];ctx.lineWidth=.5;
+  const w=WEAPONS[s.weapon],pose=WEAPON_POSES[s.weapon],reload=s.reload>0?reloadPose(s,w,game.mod.reload):null;ctx.lineWidth=.5;
   if(s.task==='supply'){const target=s.supply?.phase==='pickup'?d:game.soldiers.find(t=>t.id===s.supply?.targetId)||d;ctx.setLineDash([2,3]);line(s.x,s.y,target.x,target.y,'#e6bc7038',.45);ctx.setLineDash([]);circle(s.x,s.y,5,null,'#ddbb76');}
   const angle=s.facing||0,moving=Math.min(1,Math.hypot(s.vx||0,s.vy||0)/2),step=Math.sin(s.travel*2.4)*moving,idle=1-moving,phase=s.id*2.399963;
   const breath=Math.sin(poseTime*(1.65+(s.id%5)*.09)+phase),cycle=(poseTime+s.id*1.73)%(5.2+(s.id%4)*.7);
   const shift=cycle<1.6?Math.sin(cycle/1.6*Math.PI)**2*.48*(s.id%2?1:-1):0,sway=(shift+Math.sin(poseTime*.87+phase)*.16)*idle;
-  const sideX=-Math.sin(angle),sideY=Math.cos(angle),bodyX=s.x+sideX*sway-Math.cos(angle)*(s.recoil||0)*.65,bodyY=s.y+sideY*sway+breath*.18*idle-Math.sin(angle)*(s.recoil||0)*.65;
+  const sideX=-Math.sin(angle),sideY=Math.cos(angle),bodyX=s.x+sideX*sway-Math.cos(angle)*(s.recoil||0)*pose.recoil,bodyY=s.y+sideY*sway+breath*.18*idle-Math.sin(angle)*(s.recoil||0)*pose.recoil;
   circle(s.x+.6,s.y+1,3.7,'#080f1b88');
   // Idle pose is visual only: breathing and weight shifts never alter the world position or orders.
   const toe=step+shift*.3;
-  circle(s.x+sideX*2.5+Math.cos(angle)*toe,s.y+sideY*2.5+Math.sin(angle)*toe,1,'#8da8b7');
-  circle(s.x-sideX*2.5-Math.cos(angle)*toe,s.y-sideY*2.5-Math.sin(angle)*toe,1,'#8da8b7');
-  const gunAngle=angle+breath*.018*idle+(s.reload>0?Math.sin(poseTime*4+phase)*.055:0),barrel=(w.fixed?6.5:5.6)-(s.recoil||0)*.45;
-  line(bodyX,bodyY,bodyX+Math.cos(gunAngle)*barrel,bodyY+Math.sin(gunAngle)*barrel,'#e3eaf1',w.fixed?1.7:1.05);
+  circle(s.x+sideX*pose.stance+Math.cos(angle)*toe,s.y+sideY*pose.stance+Math.sin(angle)*toe,1,'#8da8b7');
+  circle(s.x-sideX*pose.stance-Math.cos(angle)*toe,s.y-sideY*pose.stance-Math.sin(angle)*toe,1,'#8da8b7');
+  const gunAngle=angle+breath*(pose.scope?.006:.018)*idle+(reload?reload.reach*.24:0),barrel=pose.barrel-(s.recoil||0)*pose.recoil,dx=Math.cos(gunAngle),dy=Math.sin(gunAngle),sx=-dy,sy=dx;
+  const point=(along,across=0)=>({x:bodyX+dx*along+sx*across,y:bodyY+dy*along+sy*across});
+  const gunLine=(a,b,color,width=1)=>line(a.x,a.y,b.x,b.y,color,width);
+  if(pose.fixed){for(const offset of [-3.8,3.8])gunLine(point(2,0),point(-2,offset),'#8eaaaf',.9);circle(s.x,s.y,4.2,null,'#819d9988');}
+  if(pose.bipod){gunLine(point(5),point(4,-2.4),'#8aa0ab',.65);gunLine(point(5),point(4,2.4),'#8aa0ab',.65);}
+  gunLine(point(-pose.stance*.75),point(1),'#9aaeb7',pose.width+1);gunLine(point(0),point(barrel),'#e5edf1',pose.width);
+  if(pose.scope){gunLine(point(3.5,-1.3),point(5.8,-1.3),'#bed8df',1.35);}
+  if(pose.tube)gunLine(point(2,1.3),point(5.2,1.3),'#a6b6ad',2.1);
+  if(pose.belt){const box=point(1.5,2.2+(reload?reload.reach*1.8:0));rect(box.x-1.1,box.y-1,2.2,2,'#bca86d');}
+  else if(s.weapon!=='benelli'&&s.weapon!=='m203'){gunLine(point(.8,1),point(.8-(reload?reload.reach:0),3+(reload?reload.reach*1.6:0)),'#a3b6b8',1.1);}
+  const hand=point(pose.grip-(reload?reload.reach*2:0),1.1+(reload?reload.reach*2.6:0));circle(hand.x,hand.y,.9,'#bad0bb');
+  if(reload&&s.weapon==='benelli'){const shell=point(1.3,3.6+Math.sin(reload.progress*Math.PI*6)*.6);rect(shell.x-.55,shell.y-.8,1.1,1.6,'#e8a184');}
+
   ctx.lineWidth=.55;ctx.beginPath();ctx.ellipse(bodyX,bodyY,3.3*(1+breath*.025*idle),3.3*(1-breath*.045*idle),angle,0,Math.PI*2);ctx.fillStyle=s.hit>0?'#f2d9d0':w.color;ctx.fill();ctx.strokeStyle='#e4edf3';ctx.stroke();
   label(w.icon,bodyX,bodyY+1.5,'#142333',3.8);
   if(s.covering&&game.phase==='combat'){ctx.beginPath();ctx.arc(s.x,s.y,4.5,angle-1,angle+1);ctx.lineWidth=.8;ctx.strokeStyle='#64dbc9';ctx.stroke();const gesture=Math.sin(Math.min(1,Math.max(0,game.time-(s.coop?.since||0))/.8)*Math.PI)*.8;circle(bodyX+sideX*(3.2+gesture),bodyY+sideY*(3.2+gesture),.65,'#64dbc9');}
@@ -202,13 +218,14 @@ function draw(){
  }
  for(const e of game.effects){
   const p=e.life/e.max;ctx.globalAlpha=p;
-  if(e.type==='muzzle'){const dx=Math.cos(e.angle),dy=Math.sin(e.angle);line(e.x,e.y,e.x+dx*2.1,e.y+dy*2.1,'#fff1b8',1.1);}
+  if(e.type==='muzzle'){const dx=Math.cos(e.angle),dy=Math.sin(e.angle);line(e.x,e.y,e.x+dx*2.1,e.y+dy*2.1,'#fff1b8',1.1);line(e.x-dy*.9,e.y+dx*.9,e.x+dy*.9,e.y-dx*.9,'#ffdf9d',.65);}
   if(e.type==='impact'){for(let i=0;i<3;i++){const a=i*2.094+e.x;line(e.x,e.y,e.x+Math.cos(a)*(1-p)*3,e.y+Math.sin(a)*(1-p)*3,e.color,.55);}}
-  if(e.type==='blast')circle(e.x,e.y,e.r*(1.5-p*.5),'#d2aa7055','#edc485');
+  if(e.type==='blast'){circle(e.x,e.y,e.r*(1.5-p*.5),'#d2aa7055','#edc485');circle(e.x,e.y,e.r*(1.8-p*.8),null,'#f2d2a188');}
   if(e.type==='death')circle(e.x,e.y,3*(1-p),e.color);
   if(e.type==='supply')label(e.text,e.x,e.y-8-(1-p)*5,'#e2c486',5);
   ctx.globalAlpha=1;
  }
+ for(const e of visualFX){const age=e.max-e.life,x=e.x+e.vx*age,y=e.y+e.vy*age+age*age*3;ctx.globalAlpha=Math.min(1,e.life*2.5);line(x,y,x+Math.cos(e.angle+age*7)*1.2,y+Math.sin(e.angle+age*7)*1.2,e.color,.8);}ctx.globalAlpha=1;
  // Compass and scale retain their world positions when zoomed.
  label('N',200,31,'#96a27f',6);line(200,35,200,41,'#82916c',.7);label('E',369,208,'#7b8a68',5);label('S',200,368,'#7b8a68',5);label('W',31,208,'#7b8a68',5);
  line(17,354,57,354,'#82916c',.6);line(17,351,17,357,'#82916c',.6);line(57,351,57,357,'#82916c',.6);label('40 m',37,365,'#82916c',4);
@@ -220,8 +237,17 @@ canvas.addEventListener('pointerdown',e=>{pointer={x:e.clientX,y:e.clientY,vx:vi
 canvas.addEventListener('pointermove',e=>{if(!pointer||view.zoom===1)return;const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;if(Math.hypot(dx,dy)>5)pointer.moved=true;const unit=WORLD/canvas.getBoundingClientRect().width/view.zoom;const margin=200/view.zoom;view.x=Math.max(margin,Math.min(400-margin,pointer.vx-dx*unit));view.y=Math.max(margin,Math.min(400-margin,pointer.vy-dy*unit));});
 canvas.addEventListener('pointerup',e=>{if(pointer&&!pointer.moved&&game.phase!=='home'){const p=worldPoint(e);const closest=game.living().map(s=>({s,d:Math.hypot(s.x-p.x,s.y-p.y)})).sort((a,b)=>a.d-b.d)[0];game.selectedId=closest?.d<12/view.zoom?closest.s.id:null;updateUnit();}pointer=null;});
 canvas.addEventListener('pointercancel',()=>pointer=null);
-function updateUnit(){const s=game.living().find(s=>s.id===game.selectedId);if(!s){$('unit-detail').hidden=true;return;}const w=WEAPONS[s.weapon];$('unit-detail').hidden=false;$('unit-detail').innerHTML=`<div class="unit-top"><strong>#${s.id} ${w.role} · ${w.name}</strong><button aria-label="关闭队员详情">×</button></div><p>生命 ${Math.ceil(s.hp)} / ${s.maxHP} · 弹匣 ${s.mag} / ${w.mag} · 备用 ${s.reserve}<br>${s.reload>0?'装填中 · '+s.reload.toFixed(1)+'s':s.task==='supply'?(s.supply?.phase==='pickup'?'前往弹药库':'运送 '+(s.supply?.cargo||0)+' 发弹药'):({share:'向搭档递出备用弹','team-wait':'留位警戒，等待接替',relief:'接替前排阵位',wait:'等待通行',yield:'让路后归位',retreat:'交替退守',cover:'掩护队友',move:'移动补位',aim:'瞄准目标',fire:'射击',guard:SIDES[s.side]+'警戒'}[s.activity]||SIDES[s.side]+'警戒')} · 清除 ${s.kills} · 射击 ${s.shots} 发<br>${escape(coopDetail(s))}</p>`;$('unit-detail').querySelector('button').onclick=()=>{game.selectedId=null;$('unit-detail').hidden=true;};}
-document.addEventListener('visibilitychange',()=>{if(document.hidden){if(game.phase==='combat')paused=true;save();render(true);}});
-addEventListener('pagehide',save);
-function frame(now){const dt=Math.min((now-lastFrame)/1000||0,.15);lastFrame=now;if(!paused&&!document.hidden)poseTime+=dt*(game.phase==='combat'?speed:1);if(game.phase==='combat'&&!paused&&!document.hidden){accumulator+=dt*speed;let steps=0;while(accumulator>=1/30&&steps++<20&&game.phase==='combat'){game.step(1/30);accumulator-=1/30;}}else accumulator=0;if(now-lastHud>230){render();lastHud=now;}if(now-lastSave>3500){save();lastSave=now;}draw();requestAnimationFrame(frame);}
+function updateUnit(){const s=game.living().find(s=>s.id===game.selectedId);if(!s){$('unit-detail').hidden=true;return;}const w=WEAPONS[s.weapon];$('unit-detail').hidden=false;$('unit-detail').innerHTML=`<div class="unit-top"><strong>#${s.id} ${w.role} · ${w.name}</strong><button aria-label="关闭队员详情">×</button></div><p>生命 ${Math.ceil(s.hp)} / ${s.maxHP} · 弹匣 ${s.mag} / ${w.mag} · 备用 ${s.reserve}<br>${s.reload>0?reloadPose(s,w,game.mod.reload).label+' · '+s.reload.toFixed(1)+'s':s.task==='supply'?(s.supply?.phase==='pickup'?'前往弹药库':'运送 '+(s.supply?.cargo||0)+' 发弹药'):({share:'向搭档递出备用弹','team-wait':'留位警戒，等待接替',relief:'接替前排阵位',wait:'等待通行',yield:'让路后归位',retreat:'交替退守',cover:'掩护队友',move:'移动补位',aim:'瞄准目标',fire:'射击',guard:SIDES[s.side]+'警戒'}[s.activity]||SIDES[s.side]+'警戒')} · 清除 ${s.kills} · 射击 ${s.shots} 发<br>${escape(coopDetail(s))}</p>`;$('unit-detail').querySelector('button').onclick=()=>{game.selectedId=null;$('unit-detail').hidden=true;};}
+document.addEventListener('visibilitychange',()=>{if(document.hidden){audio.sleep();if(game.phase==='combat')paused=true;save();render(true);}});
+addEventListener('pagehide',()=>{audio.sleep();save();});
+function frame(now){
+ const dt=Math.min((now-lastFrame)/1000||0,.15);lastFrame=now;const running=game.phase==='combat'&&!paused&&!document.hidden;audio.setActive(running);const cues=[];
+ if(!paused&&!document.hidden)poseTime+=dt*(game.phase==='combat'?speed:1);
+ if(running){accumulator+=dt*speed;let steps=0;while(accumulator>=1/30&&steps++<20&&game.phase==='combat'){game.step(1/30);cues.push(...feedback.collect(game));accumulator-=1/30;}
+  for(const cue of cues)if(cue.type==='shot'&&cue.weapon!=='m203'){const a=cue.angle+Math.PI/2,seed=cue.id*2.399+cue.shot;visualFX.push({x:cue.x,y:cue.y,vx:Math.cos(a)*(3+Math.sin(seed)),vy:Math.sin(a)*(3+Math.cos(seed)),angle:seed,life:.65,max:.65,color:cue.weapon==='benelli'?'#e4a17e':'#c6b67d'});}
+  for(const e of visualFX)e.life-=dt*speed;visualFX=visualFX.filter(e=>e.life>0).slice(-80);audio.playBatch(cues,view);
+ }else accumulator=0;
+ if(game.phase!=='combat')audio.setActive(false);
+ if(now-lastHud>230){render();lastHud=now;}if(now-lastSave>3500){save();lastSave=now;}draw();requestAnimationFrame(frame);
+}
 render(true);requestAnimationFrame(frame);
