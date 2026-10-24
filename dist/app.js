@@ -1,12 +1,13 @@
-import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION,MAP_PROFILES} from './engine.js?v=0.5.0';
+import {Game,WEAPONS,AMMO,SOURCES,ACTIONS,ACTION_LABELS,SIDES,WORLD,VERSION,MAP_PROFILES} from './engine.js?v=0.6.0';
 
 const $=id=>document.getElementById(id);
 const fmt=n=>Math.round(n).toLocaleString('en-US');
 const clock=t=>`${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')}`;
 const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const COOP_REASON={retreat:'后撤',relief:'接替前排',reload:'换弹归位',supply:'搬弹',reposition:'调整射界',formation:'补位'};
+const COOP_REASON={retreat:'后撤',relief:'接替前排',reload:'换弹归位',supply:'搬弹',reposition:'调整射界',formation:'补位',reinforce:'增援',restore:'归防',recover:'恢复阵位'};
 function activeGroups(){if(game.phase!=='combat')return [];return game.fireteams.filter(t=>t.activeId&&t.coverId&&t.phase!=='hold').sort((a,b)=>({retreat:5,relief:4,reload:3,supply:2}[b.reason]||1)-({retreat:5,relief:4,reload:3,supply:2}[a.reason]||1)||b.since-a.since||a.id-b.id);}
 function groupNote(){
+ const front=game.frontSummary();if(front){const team=activeGroups()[0];return front+'。'+(team?`#${team.coverId} 接火，#${team.activeId} ${COOP_REASON[team.reason]||'补位'}。`:'小组保持分工，留出中央搬弹通道。');}
  const h=game.ammoHandoffs[0],recent=game.lastBuddyTransfer;
  if(h)return `#${h.fromId} 正在递出备用弹，#${h.toId} 留在原位接应。`;
  if(recent&&game.time-recent.time<5)return `#${recent.fromId} → #${recent.toId}：匀出 ${recent.qty} 发 ${AMMO[recent.type]}，接弹后自行装填。`;
@@ -51,7 +52,7 @@ function rewardDetails(card){
 const SAVE='weiwu-run-v1',RECORDS='weiwu-records-v1',SETTINGS='weiwu-settings-v1';
 let provider=null,meta=null,modelError=false,game,paused=false,speed=1,view={zoom:1.5,x:200,y:205},lastPhase='',lastPanel='',lastHud=0,lastSave=0,accumulator=0,lastFrame=0,recorded=false,poseTime=0;
 let runId=Date.now().toString(36),saved=null,settings={ai:true},storageOkay=true;
-try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.4.0','0.3.0','0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
+try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS)||'{}')};saved=JSON.parse(localStorage.getItem(SAVE)||'null');if(![VERSION,'0.5.0','0.4.0','0.3.0','0.2.2','0.2.1','0.2.0','0.1.1'].includes(saved?.version)||saved?.state?.phase==='ended')saved=null;}catch{storageOkay=false;}
 function toast(t){$('toast').textContent=t;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,2600);}
 function save(){if(game.phase==='home'||game.phase==='ended')return;try{localStorage.setItem(SAVE,JSON.stringify({version:VERSION,runId,state:JSON.parse(game.serialize())}));}catch{if(storageOkay){storageOkay=false;toast('浏览器未允许保存，本次行动仍可继续。');}}}
 function settingsSave(){try{localStorage.setItem(SETTINGS,JSON.stringify(settings));}catch{}}
@@ -83,7 +84,7 @@ $('model-info').onclick=modelInfo;$('ai-details').onclick=modelInfo;
 $('ammo').onclick=()=>{const inv=game.inventory();modal('全队弹药账本',`<p>共享库存与个人携弹分别计算。搬运必须实际往返；换弹只使用个人备用弹药。转移据点不会免费补弹。</p>${Object.keys(AMMO).map(t=>{const units=game.living().filter(s=>WEAPONS[s.weapon].ammo===t);const carry=units.reduce((n,s)=>n+s.mag+s.reserve,0),cargo=game.living().reduce((n,s)=>n+(s.supply?.type===t?s.supply.cargo:0),0);return `<div class="ammo-row"><div>${AMMO[t]}<small>携行 ${fmt(carry)} · 运输 ${cargo} · 已射 ${fmt(inv.fired[t])} · 遗失 ${fmt(inv.lost[t])}</small></div><strong>${fmt(game.stock[t])}<small>共享库存</small></strong></div>`;}).join('')}<p class="subtle">获取总量 = 当前库存 + 个人携弹 + 运输中 + 已射击 + 阵亡遗失。新兵携带的弹药也计入获取总量。</p>`);};
 $('team').onclick=()=>modal('队伍编制',`<p>${game.living().length} 名存活 · ${game.dead} 名阵亡 · 上限 35 人。点战场上的队员可以查看个人状态。</p>${Object.entries(WEAPONS).map(([k,w])=>{const units=game.living().filter(s=>s.weapon===k);return units.length?`<div class="team-row"><div><b style="color:${w.color}">${w.icon} · ${w.role}</b><small>${w.name} · ${w.mag}${w.belt?' 发弹链装载':' 发容量'}</small></div><strong>${units.length} 人</strong></div>`:'';}).join('')}<h3>小组与搭档</h3>${game.fireteams.map(t=>`<div class="team-row"><div><b>第 ${t.id} 组 · ${SIDES[t.side]}</b><small>${t.members.map(id=>'#'+id).join(' · ')}</small></div><span>${({moving:'交替移动',handoff:'接替掩护',support:'留位掩护',hold:'保持阵位'})[t.phase]||'保持阵位'}</span></div>`).join('')}<h3>自动分工</h3><p>没有专职补给兵。缺弹时临时挑选队员离开阵位，去中央库取弹，再送给相应队员。固定机枪操作手优先留在阵位。</p><p class="subtle">幸存者进入下一据点恢复生命；阵亡人员本局不会复活。新一局恢复初始编制。</p>`);
 $('history').onclick=()=>{const rs=records();modal('战绩档案',`<p>仅保留最近 30 次行动的战绩。没有永久数值、解锁或货币。</p>${rs.length?rs.map(r=>`<div class="record-row"><div><b style="color:${r.win?'var(--lime)':'var(--danger)'}">${r.win?'行动完成':'行动失败'}</b><small>${new Date(r.date).toLocaleDateString('zh-CN')} · 种子 ${r.seed}</small></div><div>${clock(r.time)} · 清除 ${r.kills}<small>存活 ${r.survivors} / 阵亡 ${r.dead}</small></div></div>`).join(''):'<p class="subtle">还没有完成的行动。</p>'}`);};
-$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。宽口仓库、近距住宅和开阔院落的入口、遮挡、接敌距离与门防不同。路线会预告主要压力方向及完成据点的回报。最终据点需要清剿母体并撤离。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>编制与军械</h3><p>波间三选一包含军械、补给、补员或防护训练。军械卡显示实际换装人数和配套弹药，系统优先从步枪兵换装；有可用步枪兵时保留专长和固定火力。重复选择相应军械，可逐渐形成火力支援、精确射击或近距防守编制。军械使用手册中的弹种、弹匣容量和射程；弹药仍需实际搬运。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹；近旁同型武器队员可递出备用弹，递弹需短暂停火且不消耗仓库库存。队员会趁空档错峰换弹。青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
+$('help').onclick=()=>modal('行动手册与军械',`<h3>你负责选择，队伍负责作战</h3><p>选择路线 → 自动部署 → 观看战斗 → 波间随机三选一。4 个据点，每处 2 波；清剿需要消灭全部目标，坚守需要守住核心至计时结束。宽口仓库、近距住宅和开阔院落的入口、遮挡、接敌距离与门防不同。路线会预告主要压力方向及完成据点的回报。最终据点需要清剿母体并撤离。</p><p>任一据点失败，全局结束。阵亡保留，幸存者到下一个据点恢复生命。弹药有限且跨据点保留，奖励和路线是补给来源。</p><h3>编制与军械</h3><p>波间三选一包含军械、补给、补员或防护训练。军械卡显示实际换装人数和配套弹药，系统优先从步枪兵换装；有可用步枪兵时保留专长和固定火力。重复选择相应军械，可逐渐形成火力支援、精确射击或近距防守编制。军械使用手册中的弹种、弹匣容量和射程；弹药仍需实际搬运。</p><h3>观察战场</h3><p>R 步枪 / S 冲锋枪 / B 霰弹 / M 机枪 / D 精确射手 / G 榴弹 / H 固定机枪。橙色环表示搬弹；近旁同型武器队员可递出备用弹，递弹需短暂停火且不消耗仓库库存。队员会趁空档错峰换弹。青色弧线表示接火掩护，短标记提示“掩护”“后撤”或“补位”；移动者的新阵位有细小角标。弹迹是一颗颗短线，沿飞行路径判定命中。入口告急时显示橙色提示，邻近队员按余力增援；破门后交替退到内侧，压力解除后逐段恢复。中央保留搬弹空间。点击队员查看弹匣、备用弹和任务；放大后可拖动战场。</p><h3>现实军械，游戏近似</h3><p>弹种、容量与有公开资料的射程参考以下原始资料。整张战场按约 400 米表现；武器按射程与视线判定。自动火控为节约有限库存，通常等目标进入较近的交战距离再开火；交战距离是战术设定，不是武器的最大射程。伤害、命中、装填用时、防护减免、实战射击节奏、榴弹爆炸半径属于游戏近似，不代表现实装备性能。</p>${Object.values(WEAPONS).map(w=>`<div class="weapon-row"><b>${w.name}</b><span>${w.role}</span><p>${AMMO[w.ammo]} · ${w.mag} 发${w.belt?'弹链装载':'容量'} · ${w.range}m${w.rangeApprox?'（游戏设定）':''}</p><p>个人携弹初始上限 ${w.carry} 发 · 换装消耗奖励中的真实弹药</p></div>`).join('')}<p class="subtle">M249 使用 100 发携行弹链，M2 使用 100 发装载；弹链容量是本作配置。M203 可用单兵榴弹发射器按固定火力简化表现。首版没有载具。</p><div class="source-links">${SOURCES.map(s=>`<a href="${s.url}" target="_blank" rel="noopener noreferrer">${escape(s.name)} ↗</a>`).join('')}</div><h3>存档</h3><p>当前行动自动存于此浏览器，重新打开可继续；切换设备不会同步。开始新行动会替换当前行动存档。战斗过程中切到后台会自动暂停。</p>`);
 
 function render(force=false){
  document.querySelector('footer span').textContent='围屋行动 / '+VERSION;
@@ -148,6 +149,11 @@ function draw(){
   const bx=vertical?g.x+(g.side===1?8:-18):g.x-8,by=vertical?g.y-11:g.y+(g.side===0?-9:7);
   rect(bx,by,16,1.6,'#263020');rect(bx,by,16*p,1.6,p<.3?'#d49776':'#adc18a');
  }
+ if(game.phase==='combat')for(const [side,lane] of game.lanes.entries()){
+  if(!lane||lane.state==='guard')continue;const g=game.gates[side],color=lane.state==='recover'?'#9edacb':'#edba7c',word={alarm:'告急',withdraw:'退守',hold:'坚守',recover:'恢复'}[lane.state];
+  const p=side===0?{x:g.x,y:g.y-14}:side===2?{x:g.x,y:g.y+18}:side===1?{x:g.x+18,y:g.y-8}:{x:g.x-18,y:g.y-8};
+  circle(g.x,g.y,9,null,color+'88');label(word,p.x,p.y,color,5);
+ }
  // Depot and command core.
  const d=map.depot;rect(d.x-6,d.y-5,12,10,'#3a4630','#8b9c62');line(d.x-3,d.y,d.x+3,d.y,'#b6c991',1);line(d.x,d.y-3,d.x,d.y+3,'#b6c991',1);label('弹药库',d.x,d.y+12,'#b0bf95',4);
  if(game.core.hp<game.core.max){circle(d.x,d.y,10,null,'#d49b77');}
@@ -183,7 +189,7 @@ function draw(){
   if(s.reload>0){ctx.strokeStyle='#d0d6b9';ctx.lineWidth=.8;ctx.beginPath();ctx.arc(s.x,s.y,4.5,-Math.PI/2,-Math.PI/2+Math.PI*2*(1-s.reload/(w.reload/game.mod.reload)));ctx.stroke();}
   if(s.supply?.cargo){rect(s.x+3,s.y+2,3,2,'#e5bc73');}
   if(marked.has(s.id)||game.handoffFor(s)||game.selectedId===s.id){
-   const text=game.handoffFor(s)?(game.handoffFor(s).fromId===s.id?'递弹':'接弹'):s.coop?.role==='cover'?'掩护':s.coop?.role==='move'?(s.coop.reason==='retreat'?'后撤':s.coop.reason==='reload'?(s.reload>0?'换弹':'归位'):'补位'):'';
+   const text=game.handoffFor(s)?(game.handoffFor(s).fromId===s.id?'递弹':'接弹'):s.coop?.role==='cover'?'掩护':s.coop?.role==='move'?(s.coop.reason==='retreat'?'后撤':s.coop.reason==='reload'?(s.reload>0?'换弹':'归位'):s.coop.reason==='reinforce'?'增援':s.coop.reason==='restore'?'归防':s.coop.reason==='recover'?'恢复':'补位'):'';
    if(text){const position=[{x:s.x,y:s.y-12},{x:s.x,y:s.y+12},{x:s.x-14,y:s.y},{x:s.x+14,y:s.y}].find(p=>units.every(a=>a===s||Math.hypot(a.x-p.x,a.y-p.y)>10)&&tagPositions.every(a=>Math.hypot(a.x-p.x,a.y-p.y)>17));if(position){tagPositions.push(position);rect(position.x-7,position.y-4.8,14,7,'#102332dd');label(text,position.x,position.y+.4,'#9de1d3',4.8);}}
   }
   if(game.selectedId===s.id){ctx.lineWidth=.7;circle(s.x,s.y,7,null,'#e2edb8');}
