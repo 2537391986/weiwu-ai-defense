@@ -10,3 +10,6 @@ body{background:#0b111d}.app{padding:0 14px;box-shadow:0 0 80px #0004}.topbar{pa
 
 /* Route and loadout choices */
 .choice-context{display:grid;gap:4px;padding:10px 11px;margin:0 0 12px;background:#172437;border:1px solid #30465d;border-radius:3px;font-size:10px;line-height:1.6;color:#aabed0}.choice-context b{font-weight:500;color:#a9dcc7}.choice-context span{color:#8fa8bc}.choice-context small{font-size:9px;color:#dfbd82}.route-card{min-height:230px}.route-front{font-size:9px;color:#9bbbc7;line-height:1.7}.route-card p.route-payout{font-size:9px;color:#b3c8d4;margin:8px 0 12px;line-height:1.8}.route-card .route-reward{font-size:10px}.reward-copy p.reward-impact{color:#a7d8c3;margin-top:6px}.reward-copy p.reward-ammo{color:#d5be89;font-size:9px;line-height:1.7}.reward-copy{min-width:0}.reward-copy>div{flex-wrap:wrap;row-gap:4px}.reward-copy h3{line-height:1.5}
+
+/* 0.7 optional battle sound control */
+.sound-strip{display:flex;align-items:center;gap:10px;padding:0 0 12px;color:var(--muted);font-size:9px}.sound-button{border:1px solid var(--line);border-radius:3px;min-height:34px;padding:6px 11px;font-size:10px;color:var(--muted)}.sound-button[aria-pressed=true]{color:var(--lime);background:var(--surface);border-color:#6d927d}
