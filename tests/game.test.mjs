@@ -60,7 +60,7 @@ test('a threatened group withdraws under cover, then hands cover to the first ar
  }
  assert.equal(moved.size,north.length);assert.ok(handedOver,'the first arrival covers the following teammate');
  assert.ok(north.every(s=>!g.inTransit(s)));assert.deepEqual(quiet.map(s=>[s.x,s.y]),quietPositions);
- g.enemies=[];g.tactic='balanced';g.coordinate();assert.equal(g.lanes[0].depth,0);accounting(g);
+ g.enemies=[];g.tactic='balanced';g.coordinate();assert.equal(g.lanes[0].depth,13,'the line first holds after pressure clears');for(let i=0;i<1200;i++){g.time+=1/30;for(const s of g.living())g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();}assert.equal(g.lanes[0].depth,0);accounting(g);
 });
 
 test('a reloading soldier steps back while an armed teammate covers the entrance',()=>{const g=active(),group=g.living().filter(s=>s.side===0),reloading=group.find(s=>s.weapon==='m4');reloading.reload=2;g.coordinate();const covering=group.find(s=>s.covering);assert.ok(covering);assert.notEqual(covering.id,reloading.id);assert.ok(covering.mag>0);assert.ok(covering.holdPoint.y<reloading.holdPoint.y);});
@@ -413,4 +413,54 @@ test('a handoff donor pauses fire and a completed recipient still performs a rea
  const {g,donor,recipient}=sharingScene();g.assignBuddyAmmo();g.remaining=1000;g.spawnClock=999;g.decisionAge=-999;g.coordinationAge=-999;g.supplyClock=999;
  const z=g.spawnEnemy('walker',0);z.x=195;z.y=103;z.hp=z.max=100000;const shots=donor.shots;for(let i=0;i<20;i++)g.step(1/30);assert.equal(donor.shots,shots,'a donor uses the short handoff interval to pass ammunition');
  for(let i=0;i<25;i++)g.step(1/30);assert.equal(g.buddyTransfers,1);assert.equal(recipient.mag,0);assert.ok(recipient.reload>0,'received rounds are in reserve until reload completes');accounting(g);
+});
+
+function frontScene(){
+ const g=active(71);g.time=10;g.tactic='balanced';g.enemies=[];g.gates[0].hp=g.gates[0].max*.3;
+ for(let i=0;i<3;i++){const z=g.spawnEnemy('walker',0);z.x=196+i*4;z.y=126;}
+ return g;
+}
+function advanceFront(g,seconds){for(let i=0;i<seconds*30;i++){g.time+=1/30;for(const s of g.living())if(s.task==='supply')g.updateSupply(s,1/30);else g.move(s,1/30,3);g.resolveBodies(1/30);if(i%12===0)g.coordinate();}}
+test('a weakened entrance requests one adjacent reinforcement and keeps neighbouring guards in place',()=>{
+ const g=frontScene(),before=g.living().map(s=>[s.x,s.y]),sides=new Map(g.living().map(s=>[s.id,s.side]));g.coordinate();
+ assert.equal(g.lanes[0].state,'alarm');const reinforcements=g.living().filter(s=>s.reinforcement);assert.equal(reinforcements.length,1);const unit=reinforcements[0];assert.ok([1,3].includes(unit.reinforcement.from));assert.equal(unit.side,0);assert.ok(g.inTransit(unit));assert.deepEqual(g.living().map(s=>[s.x,s.y]),before,'a reinforcement receives a physical route');
+ assert.ok(g.living().filter(s=>s.side===unit.reinforcement.from).length>=2);assert.ok(g.living().filter(s=>s.side===2).every(s=>s.side===sides.get(s.id)));
+ const destination={...unit.goal};g.time+=8;g.coordinate();assert.equal(g.living().filter(s=>s.reinforcement).length,1,'another reinforcement waits while the first is still travelling');assert.deepEqual(unit.goal,destination);assert.match(g.frontSummary(),/告急.*增援/);accounting(g);
+});
+test('a donor entrance under pressure cannot supply a reinforcement and fixed guns keep their mounts',()=>{
+ const g=frontScene();for(const side of [1,3])for(let i=0;i<4;i++){const z=g.spawnEnemy('walker',side);z.x=g.gates[side].x+(side===1?8:-8);z.y=201+i*2;}
+ const gun=g.soldiers.find(s=>s.side===2);burn(g,gun);gun.weapon='m2';g.gainAmmo('n50',200);g.takeAmmo(gun,200);gun.mount={x:gun.x,y:gun.y};const mount={...gun.mount};g.coordinate();assert.ok(g.living().every(s=>!s.reinforcement));assert.deepEqual(gun.goal,mount);assert.equal(gun.side,2);accounting(g);
+});
+test('a broken gate triggers covered withdrawal with separate goals and a central supply passage',()=>{
+ const g=frontScene();g.gates[0].hp=0;g.coordinate();assert.equal(g.lanes[0].depth,13);assert.equal(g.lanes[0].state,'withdraw');
+ const north=g.living().filter(s=>s.side===0),movers=north.filter(s=>g.inTransit(s)&&s.order?.kind==='retreat');assert.ok(movers.length>0);assert.ok(north.some(s=>s.covering&&!g.inTransit(s)));
+ for(const s of movers){assert.ok(Math.abs(s.order.request.x-200)>=11);assert.ok(!g.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2));assert.ok(Math.hypot(s.goal.x-200,s.goal.y-205)>=14);}
+ spaced(g.living(),s=>s.goal,UNIT_SPACE-.05);const positions=g.living().map(s=>[s.x,s.y]);g.coordinate();assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions);accounting(g);
+});
+test('a breached front holds through brief lulls, recovers in steps and stops recovering when pressure returns',()=>{
+ const g=frontScene();g.gates[0].hp=0;g.coordinate();const depth=g.lanes[0].depth;
+ g.enemies=[];g.coordinate();g.time+=3.9;g.coordinate();assert.equal(g.lanes[0].depth,depth);
+ g.time+=3;g.coordinate();assert.equal(g.lanes[0].depth,depth-6);assert.equal(g.lanes[0].state,'recover');
+ const z=g.spawnEnemy('heavy',0);z.x=200;z.y=162;z.entered=z.inside=true;g.coordinate();assert.equal(g.lanes[0].depth,13);assert.notEqual(g.lanes[0].state,'recover');assert.equal(g.gates[0].hp,0,'a tactical recovery never repairs a broken gate');accounting(g);
+});
+test('reinforcements arrive by walking and return to their original entrance only after pressure has cleared',()=>{
+ const g=frontScene();g.coordinate();const s=g.living().find(s=>s.reinforcement),from=s.reinforcement.from;advanceFront(g,70);assert.ok(!g.inTransit(s),'the nearby reinforcement arrives');assert.equal(s.side,0);
+ g.enemies=[];g.coordinate();g.time+=3;g.coordinate();assert.equal(s.side,0,'the reinforcement does not turn back after a momentary lull');g.time+=4;g.coordinate();assert.equal(s.side,from);assert.equal(s.reinforcement.returning,true);assert.ok(g.inTransit(s));advanceFront(g,90);assert.equal(s.reinforcement,null);assert.ok(!g.inTransit(s));accounting(g);
+});
+test('retreat destinations leave the depot free on all terrains with a large squad',()=>{
+ for(const template of ['warehouse','house','yard']){
+  const g=new Game({seed:71});while(g.living().length<25)g.addSoldier('m4');g.deploy();g.start();g.enterNode({template,mode:'hold',danger:0,name:template});g.time=10;
+  for(let side=0;side<4;side++)for(let i=0;i<4;i++){const z=g.spawnEnemy('walker',side),p=g.formationPoint(side,25,i*4-6);z.x=p.x;z.y=p.y;z.entered=z.inside=true;}
+  g.coordinate();for(const s of g.living()){assert.ok(g.insideRoom(s.goal));assert.ok(!g.blocked(s.goal.x,s.goal.y,UNIT_RADIUS+.2));assert.ok(Math.hypot(s.goal.x-200,s.goal.y-205)>=14);}spaced(g.living(),s=>s.goal,UNIT_SPACE-.05);accounting(g);
+ }
+});
+test('a front response and its returning reinforcement resume identically after saving',()=>{
+ const g=frontScene();g.gates[0].hp=0;g.coordinate();advanceFront(g,2);const h=Game.restore(g.serialize(),inferPolicy);advanceFront(g,2);advanceFront(h,2);assert.equal(h.serialize(),g.serialize());accounting(h);
+ const raw=JSON.parse(g.serialize());delete raw.frontResponseAt;for(const lane of raw.lanes)if(lane){delete lane.state;delete lane.quietSince;delete lane.recovering;}const legacy=Game.restore(raw,inferPolicy),positions=legacy.living().map(s=>[s.x,s.y]),inv=legacy.inventory();legacy.coordinate();assert.deepEqual(legacy.living().map(s=>[s.x,s.y]),positions);assert.deepEqual(legacy.inventory(),inv);
+});
+
+test('a hauler can fetch and deliver through a settled 25-person retreat without blocking the depot',()=>{
+ const g=new Game({seed:71});while(g.living().length<25)g.addSoldier('m4');g.deploy();g.start();g.enterNode({template:'warehouse',mode:'hold',danger:0,name:'test'});g.time=10;
+ for(let i=0;i<4;i++){const z=g.spawnEnemy('walker',0);z.x=194+i*4;z.y=160;z.entered=z.inside=true;}g.coordinate();advanceFront(g,100);assert.ok(g.living().every(s=>!g.inTransit(s)));
+ const recipient=g.soldiers[0];burn(g,recipient);g.assignSupplies();assert.ok(recipient.supplyAssigned);advanceFront(g,100);assert.equal(g.supplyRuns,1);assert.equal(recipient.reserve,90);assert.ok(g.living().every(s=>!g.inTransit(s)));spaced(g.living());accounting(g);
 });
