@@ -1,9 +1,21 @@
-export const VERSION='0.3.0';
+export const VERSION='0.4.0';
 export const UNIT_RADIUS=3.3,UNIT_SPACE=9;
 export const SIDES=['北侧','东侧','南侧','西侧'];
 export const ACTIONS=['balanced','reinforce_north','reinforce_east','reinforce_south','reinforce_west','resupply','fallback','focus_heavy'];
 export const ACTION_LABELS=['均衡防守','北侧增援','东侧增援','南侧增援','西侧增援','优先补给','收缩防线','集火重型'];
 export const AMMO={n556:'5.56',n9:'9mm',shell:'12号',n762:'7.62',g40:'40mm',n50:'12.7'};
+export const MAP_PROFILES={
+ warehouse:{name:'废弃仓库',tag:'宽口仓库',widths:[14,26,14,26],gateHP:700,edge:18,pace:1,fronts:[1,3],description:'东西入口较宽，中央通道开阔，适合持续火力与分段掩护。'},
+ house:{name:'封锁住宅',tag:'近距住宅',widths:[12,12,12,12],gateHP:750,edge:45,pace:1.12,fronts:[0,2],description:'入口较窄、街巷接敌更近，家具切断部分射界，近距小组更容易接火。'},
+ yard:{name:'围墙院落',tag:'开阔院落',widths:[24,24,24,24],gateHP:650,edge:12,pace:1.02,fronts:[0,1,2,3],description:'四门宽、遮挡少，来敌从更远处接近；远射武器能更早参与，但门防较弱。'}
+};
+const LOADOUTS={
+ close:{name:'近距防守组',tag:'近距',icon:'S',weapons:['mp5','benelli'],minStage:0,notes:'MP5 与 Benelli M4 各一名，负责近距离接火。'},
+ support:{name:'M249 火力组',tag:'持续火力',icon:'M',weapon:'m249',count:2,minStage:0,notes:'两名机枪手补充持续火力，使用全队共用的 5.56 弹药。'},
+ precision:{name:'M110 精确射击组',tag:'远射',icon:'D',weapon:'m110',count:2,minStage:1,notes:'两名精确射手能更早接敌，并优先处理可见的装甲目标。'},
+ grenadier:{name:'M203 榴弹组',tag:'群体火力',icon:'G',weapon:'m203',count:2,minStage:1,notes:'两名榴弹手优先处理聚集目标，受最小射程和友军安全距离限制。'},
+ fixed:{name:'M2HB 固定火力',tag:'固定阵位',icon:'H',weapon:'m2',count:1,minStage:2,notes:'一名固定机枪手；部署后不随补位移动，单独使用 12.7 弹药。'}
+};
 const ENGAGEMENT={m4:95,mp5:70,benelli:40,m249:125,m110:220,m203:100,m2:180};
 export const SOURCES=[
  {name:'M4A1 · 澳大利亚海军',url:'https://www.navy.gov.au/capabilities/weapons/m4a1-carbine'},
@@ -105,24 +117,36 @@ export class Game{
  capacity(s){return Math.round(WEAPONS[s.weapon].carry*this.mod.carry);}
  gainAmmo(type,n){this.stock[type]=(this.stock[type]||0)+n;this.acquired[type]=(this.acquired[type]||0)+n;}
  makeMap(template){
-  const x=130,y=135,w=140,h=140,g=16,t=2;
-  const walls=[
-   {x,y,w:62,h:t},{x:208,y,w:62,h:t},{x,y:y+h-t,w:62,h:t},{x:208,y:y+h-t,w:62,h:t},
-   {x,y,w:t,h:62},{x,y:213,w:t,h:62},{x:x+w-t,y,w:t,h:62},{x:x+w-t,y:213,w:t,h:62}
-  ];
-  const crates=template==='house'?[{x:158,y:174,w:15,h:20},{x:228,y:228,w:16,h:18}]:template==='yard'?[{x:166,y:230,w:19,h:8},{x:227,y:169,w:8,h:19}]:[{x:154,y:165,w:18,h:13},{x:226,y:237,w:20,h:12}];
-  return {template,walls,crates,house:{x,y,w,h},depot:{x:200,y:205}};
+  const profile=MAP_PROFILES[template]||MAP_PROFILES.warehouse,x=130,y=135,w=140,h=140,t=2,walls=[];
+  for(const side of [0,2]){const gap=profile.widths[side],wy=side===0?y:y+h-t;walls.push({x,y:wy,w:70-gap/2,h:t},{x:200+gap/2,y:wy,w:70-gap/2,h:t});}
+  for(const side of [1,3]){const gap=profile.widths[side],wx=side===3?x:x+w-t;walls.push({x:wx,y,w:t,h:70-gap/2},{x:wx,y:205+gap/2,w:t,h:70-gap/2});}
+  const crates=template==='house'?[{x:158,y:174,w:15,h:20},{x:228,y:228,w:16,h:18},{x:169,y:220,w:18,h:8}]:template==='yard'?[{x:155,y:235,w:16,h:6},{x:237,y:162,w:6,h:16}]:[{x:154,y:165,w:18,h:13},{x:226,y:237,w:20,h:12}];
+  return {template,walls,crates,house:{x,y,w,h},depot:{x:200,y:205},terrain:{...profile,widths:[...profile.widths],fronts:[...profile.fronts]}};
  }
  setupGates(){
-  const points=[{x:200,y:135},{x:270,y:205},{x:200,y:275},{x:130,y:205}];
-  this.gates=points.map((p,i)=>({...p,side:i,hp:700*this.mod.doors,max:700*this.mod.doors}));
+  const points=[{x:200,y:135},{x:270,y:205},{x:200,y:275},{x:130,y:205}],profile=this.map.terrain;
+  this.gates=points.map((p,i)=>({...p,side:i,width:profile?.widths[i]||16,hp:(profile?.gateHP||700)*this.mod.doors,max:(profile?.gateHP||700)*this.mod.doors}));
   this.navVersion=(this.navVersion||0)+1;
  }
  start(){if(this.phase==='home'){this.phase='route';this.choices=this.routeChoices();}}
+ ammoPackage(scale=1){
+  const quantities={n556:600,n9:240,shell:56,n762:120,g40:12,n50:200},types=new Set(this.living().map(s=>WEAPONS[s.weapon].ammo)),ammo={};
+  for(const type of types)ammo[type]=Math.max(1,Math.round(quantities[type]*scale));return ammo;
+ }
+ packageCard(key){
+  const spec=LOADOUTS[key];return {id:'loadout-'+key,kind:spec.weapons?'loadout':'weapon',loadout:key,...spec};
+ }
  routeChoices(){
-  const stage=this.nodeIndex+1;
-  const templates=this.rng.shuffle(['warehouse','house','yard']);
-  return [0,1].map((v)=>({id:'route-'+stage+'-'+v,template:templates[v],mode:stage===0||stage===3?'clear':v===0?'clear':'hold',danger:v===0?0:1,flavor:v===0?'ammo':'rescue',name:templates[v]==='warehouse'?'废弃仓库':templates[v]==='house'?'封锁住宅':'围墙院落',reward:v===0?'弹药补给':'救援队员',description:stage===3?'发现母体活动，完成最终清剿。':v===0?'清理入侵尸群，取得有限弹药。':stage===0?'清剿尸群，接应幸存人员。':'守住据点核心，接应幸存人员。'}));
+  const stage=this.nodeIndex+1,templates=this.rng.shuffle(['warehouse','house','yard']);
+  return [0,1].map(v=>{
+   const template=templates[v],profile=MAP_PROFILES[template],flavor=stage===3?'final':v===0?'ammo':stage>=1&&(this.living().length>=33||this.rng.next()<.6)?'armory':'rescue';
+   const fronts=template==='yard'?this.rng.shuffle([0,1,2,3]).slice(0,2):[...profile.fronts];
+   let payout=null,reward='最终撤离';
+   if(flavor==='ammo'){payout={kind:'ammo',ammo:this.ammoPackage(.5)};reward='兼容弹药补给';}
+   if(flavor==='rescue'){payout={kind:'rescue',count:2};reward='接应 2 名步枪兵';}
+   if(flavor==='armory'){const keys=Object.keys(LOADOUTS).filter(k=>LOADOUTS[k].minStage<=stage&&this.loadoutPreview(this.packageCard(k)).changes.length);const key=this.rng.pick(keys.length?keys:['support']);payout={kind:'armory',card:this.packageCard(key)};reward=LOADOUTS[key].name;}
+   return {id:'route-'+stage+'-'+v,template,mode:stage===0||stage===3?'clear':v===0?'clear':'hold',danger:v,flavor,name:profile.name,reward,payout,fronts,terrain:profile.tag,description:stage===3?'完成最终清剿，消灭母体并撤离。':profile.description};
+  });
  }
  enterNode(choice){
   if(this.phase!=='route')return false;
@@ -132,22 +156,35 @@ export class Game{
   for(const s of this.living()){s.hp=s.maxHP;s.supply=null;s.supplyAssigned=null;s.task='guard';s.path=[];s.reload=0;s.goal=null;s.order=null;s.guardPoint=null;s.nav={lastCheck:this.time,remaining:0,stalled:0,replans:0,waitUntil:0,waitFor:null,yield:null,nextRetry:0};s.mount=null;s.setup=3;s.vx=s.vy=0;s.moveHeading=null;s.targetId=null;s.localOffset=null;s.maneuverUntil=this.time;const safe=this.freePoint(s,s,'spawn');if(this.blocked(s.x,s.y,UNIT_RADIUS+.2)&&safe){s.x=safe.x;s.y=safe.y;}}
   for(const team of this.fireteams){team.moverId=null;team.coverId=null;team.lastMoverId=null;team.readyAt=0;team.phase='hold';team.reason='';}
   for(const s of this.living()){s.coop=null;s.relief=false;}
-  this.deploy();this.beginWave();
+  this.tactic='balanced';this.tacticCandidate=null;this.tacticChangedAt=-99;this.lastAiAction='';
+  this.prepareSiteDeployment();this.deploy();this.beginWave();
   this.log('据点 '+(this.nodeIndex+1),choice.name+' · '+(choice.mode==='hold'?'限时坚守':'清剿')+'。幸存者恢复生命，弹药按原库存保留。');
   return true;
  }
  beginWave(){
   this.wave++;this.waveTime=0;this.phase='combat';this.projectiles=[];this.spawnClock=.3;this.remaining=80+this.nodeIndex*30+(this.wave-1)*20+(this.node.danger?16:0);
-  this.spawnInterval=(50+this.nodeIndex*13+(this.wave-1)*12)/Math.ceil(this.remaining/12);
+  this.spawnInterval=(50+this.nodeIndex*13+(this.wave-1)*12)*(this.map.terrain?.pace||1)/Math.ceil(this.remaining/12);
   this.holdDuration=70+this.nodeIndex*4;this.waveSpawned=0;this.bossSpawned=false;
   this.decisionAge=99;this.log('第 '+this.wave+' / 2 波',this.node.mode==='hold'?'守住核心至倒计时结束。':'清除本波全部敌人。');
+ }
+ prepareSiteDeployment(){
+  if(!this.node.fronts?.length)return;this.refreshTeams();
+  const alive=this.living(),fixedTeams=this.fireteams.filter(t=>t.members.some(id=>alive.some(s=>s.id===id&&WEAPONS[s.weapon].fixed)));
+  for(const team of fixedTeams){
+   if(this.node.fronts.includes(team.side))continue;
+   const sides=[...this.node.fronts].sort((a,b)=>alive.filter(s=>s.side===a&&WEAPONS[s.weapon].fixed).length-alive.filter(s=>s.side===b&&WEAPONS[s.weapon].fixed).length);
+   const target=this.fireteams.filter(t=>sides.includes(t.side)&&t!==team&&!t.members.some(id=>alive.some(s=>s.id===id&&WEAPONS[s.weapon].fixed))).sort((a,b)=>sides.indexOf(a.side)-sides.indexOf(b.side)||Math.abs(a.members.length-team.members.length)-Math.abs(b.members.length-team.members.length)||a.id-b.id)[0];
+   if(!target)continue;const side=team.side;team.side=target.side;target.side=side;
+   for(const t of [team,target])for(const id of t.members){const s=alive.find(s=>s.id===id);if(s){s.side=t.side;s.formationSlot=null;s.formationSide=null;}}
+  }
+  this.teamRoster='';
  }
  deploy(){
   const alive=this.living(),counts=[0,0,0,0];
   for(const s of alive)if(s.assigned)counts[s.side]++;
   for(const s of alive)if(!s.assigned){s.side=counts.indexOf(Math.min(...counts));counts[s.side]++;s.assigned=true;s.facing=[-Math.PI/2,0,Math.PI/2,Math.PI][s.side];}
   this.coordinate(true);
-  if(this.phase==='home')for(const s of alive)if(s.goal){s.x=s.goal.x;s.y=s.goal.y;s.path=[];s.order.arrivedAt=this.time-4;}
+  if(this.phase==='home'||this.phase==='route')for(const s of alive)if(s.goal){s.x=s.goal.x;s.y=s.goal.y;s.path=[];s.order.arrivedAt=this.phase==='home'?this.time-4:this.time;}
  }
  formationPoint(side,depth,offset){
   const g=this.gates[side];
@@ -489,11 +526,12 @@ export class Game{
   const side=forceSide??this.rng.int(4),g=this.gates[side];
   let kind=forceKind||this.rng.pick(this.nodeIndex>=1?['walker','walker','walker','runner','heavy']:['walker','walker','walker','runner']);
   const z={id:this.id++,side,kind,x:0,y:0,hp:kind==='mother'?2400:kind==='heavy'?200:kind==='runner'?70:90,max:0,armor:kind==='heavy'?.55:kind==='mother'?.32:0,speed:kind==='mother'?1.8:kind==='runner'?5:kind==='heavy'?2:2.7,attack:0,inside:false,entered:false};
-  const spread=(this.rng.next()-.5)*110;
-  if(side===0){z.x=200+spread;z.y=18+this.rng.next()*10;}
-  if(side===1){z.x=375+this.rng.next()*8;z.y=205+spread;}
-  if(side===2){z.x=200+spread;z.y=383-this.rng.next()*10;}
-  if(side===3){z.x=17+this.rng.next()*8;z.y=205+spread;}
+  const spread=(this.rng.next()-.5)*110,edge=this.map.terrain?.edge??18;
+  z.entryOffset=g.width?((z.id*.61803398875)%1-.5)*Math.max(0,g.width-7):0;
+  if(side===0){z.x=200+spread;z.y=edge+this.rng.next()*10;}
+  if(side===1){z.x=400-edge-this.rng.next()*10;z.y=205+spread;}
+  if(side===2){z.x=200+spread;z.y=400-edge-this.rng.next()*10;}
+  if(side===3){z.x=edge+this.rng.next()*10;z.y=205+spread;}
   z.max=z.hp;this.enemies.push(z);this.spawned++;this.waveSpawned++;return z;
  }
  assignSupplies(){
@@ -595,7 +633,9 @@ export class Game{
    if((committed.get(z.id)||0)>=z.hp*1.05&&!w.blast)continue;
    if(this.friendlyBlocker(s,z,alive)){if(!blocked||dist(s,z)<dist(s,blocked))blocked=z;continue;}
    const protect=protectedUnit&&z.entered?Math.max(0,24-dist(z,protectedUnit))*2:0;
-   let v=d+(z.id===s.targetId?-9:0)+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0)-protect;
+   const armorFit=(s.weapon==='m110'||s.weapon==='m2')?-z.armor*35:w.pierce<.2?z.armor*20:0;
+   const cluster=w.blast?Math.min(4,targets.filter(a=>a!==z&&a.hp>0&&dist(a,z)<w.blast).length)*6:0;
+   let v=d+(z.id===s.targetId?-9:0)+(z.inside?-55:0)+(this.tactic==='focus_heavy'&&(z.kind==='heavy'||z.kind==='mother')?-120:0)-protect+armorFit-cluster;
    if(z.side!==s.side&&!z.inside)v+=45;
    if(v<score){best=z;score=v;}
   }
@@ -633,7 +673,7 @@ export class Game{
   this.time+=dt;this.waveTime+=dt;this.nodeTime+=dt;this.decisionAge+=dt;
   if(this.decisionAge>=1.2){this.decide();this.decisionAge=0;}
   this.spawnClock-=dt;
-  if(this.remaining>0&&this.spawnClock<=0){const count=Math.min(12,this.remaining,240-this.enemies.filter(z=>z.hp>0).length),side=this.rng.int(4);for(let i=0;i<count;i++){this.spawnEnemy(null,this.rng.next()<.8?side:this.rng.int(4));this.remaining--;}this.spawnClock=this.spawnInterval*(.94+this.rng.next()*.12);}
+  if(this.remaining>0&&this.spawnClock<=0){const count=Math.min(12,this.remaining,240-this.enemies.filter(z=>z.hp>0).length),side=this.node.fronts?.length&&this.rng.next()<.65?this.rng.pick(this.node.fronts):this.rng.int(4);for(let i=0;i<count;i++){this.spawnEnemy(null,this.rng.next()<.8?side:this.rng.int(4));this.remaining--;}this.spawnClock=this.spawnInterval*(.94+this.rng.next()*.12);}
   if(this.nodeIndex===3&&this.wave===2&&!this.bossSpawned&&this.waveTime>18){this.spawnEnemy('mother',this.rng.int(4));this.bossSpawned=true;this.log('母体出现','集中重火力，注意侧门和弹药储备。');}
   if(!this.supplyClock||this.time>=this.supplyClock){this.assignSupplies();this.supplyClock=this.time+.6;}
   const alive=this.living(),targets=this.enemies.filter(z=>z.hp>0);
@@ -667,15 +707,20 @@ export class Game{
   this.resolveBodies(dt);
   for(const z of targets){
    if(z.hp<=0)continue;z.attack=Math.max(0,z.attack-dt);z.hit=Math.max(0,(z.hit||0)-dt);z.vx=z.vy=0;
-   const gate=this.gates[z.side];
-   let goal=gate;
+   const gate=this.gates[z.side],entry={x:gate.x+(z.side===0||z.side===2?z.entryOffset||0:0),y:gate.y+(z.side===1||z.side===3?z.entryOffset||0:0)},inner={...entry};
+   if(z.side===0)inner.y+=8;if(z.side===1)inner.x-=8;if(z.side===2)inner.y-=8;if(z.side===3)inner.x+=8;
+   const entryDepth=z.side===0?z.y-gate.y:z.side===1?gate.x-z.x:z.side===2?gate.y-z.y:z.x-gate.x;
+   let goal=entry;
    if(!z.entered){
-    const outside={...gate};if(z.side===0)outside.y-=4;if(z.side===1)outside.x+=4;if(z.side===2)outside.y+=4;if(z.side===3)outside.x-=4;
+    const outside={...entry};if(z.side===0)outside.y-=4;if(z.side===1)outside.x+=4;if(z.side===2)outside.y+=4;if(z.side===3)outside.x-=4;
     goal=outside;
-    if(dist(z,gate)<7){
+    if(dist(z,entry)<7){
      if(gate.hp>0){if(z.attack<=0){gate.hp=Math.max(0,gate.hp-(z.kind==='mother'?65:z.kind==='heavy'?28:12));z.attack=.9;if(gate.hp===0){this.log(SIDES[z.side]+'破口','自动防守重新评估，尸群可以通过入口。');this.decisionAge=99;}}continue;}
-     z.entered=true;goal=CENTER;
+     z.entered=true;goal=inner;
     }
+   }else if(entryDepth<7){
+    // Finish crossing the doorway before turning toward a nearby defender.
+    goal=inner;
    }else{
     z.inside=true;
     let closest=null,d=Infinity;
@@ -705,51 +750,83 @@ export class Game{
   else complete=this.remaining===0&&!this.enemies.some(z=>z.hp>0)&&(this.nodeIndex!==3||this.wave!==2||this.bossSpawned);
   if(complete)this.finishWave();
  }
- finishWave(){
-  if(this.wave>=2){
-   if(this.node.flavor==='ammo'){this.gainAmmo('n556',260);this.gainAmmo('shell',28);this.log('取得据点物资','获得260发5.56与28发霰弹，未自动补满全队储备。');}
-   else {let added=0;for(let i=0;i<2;i++)if(this.addSoldier('m4',true))added++;this.log('救援完成','接应 '+added+' 名队员加入，携带明确的初始弹药。');}
-   if(this.nodeIndex>=3){this.end(true,'最终据点已清除');return;}
+ loadoutPreview(card){
+  const weapons=card.weapons||Array.from({length:card.count??(WEAPONS[card.weapon]?.fixed?1:2)},()=>card.weapon),changes=[],used=new Set(),ammo={};
+  for(const key of weapons){
+   const w=WEAPONS[key];if(!w)continue;
+   ammo[w.ammo]=(ammo[w.ammo]||0)+w.carry;
+   const units=this.living().filter(s=>!used.has(s.id)&&s.weapon!==key&&(!WEAPONS[s.weapon].fixed||card.allowFixed));
+   const firstTeam=changes.length?this.soldiers.find(s=>s.id===changes[0].id)?.teamId:null;
+   const rank=s=>({m4:0,mp5:1,benelli:2,m249:4,m110:5,m203:6,m2:100}[s.weapon]??10)*10+(s.task==='supply'?80:0)-(this.node?.fronts?.includes(s.side)?1:0)-(firstTeam&&s.teamId===firstTeam?2:0);
+   units.sort((a,b)=>rank(a)-rank(b)||a.id-b.id);const unit=units[0];if(unit){changes.push({id:unit.id,from:unit.weapon,to:key});used.add(unit.id);}
   }
+  return {changes,ammo:card.ammo?{...card.ammo}:ammo};
+ }
+ applyLoadout(card){
+  const preview=this.loadoutPreview(card);
+  for(const [type,qty] of Object.entries(preview.ammo))this.gainAmmo(type,qty);
+  for(const change of preview.changes){
+   const s=this.soldiers.find(s=>s.id===change.id),old=WEAPONS[s.weapon];this.stock[old.ammo]+=s.mag+s.reserve;s.mag=s.reserve=0;s.weapon=change.to;s.reload=0;s.mount=null;s.setup=3;this.takeAmmo(s,this.capacity(s));
+  }
+  return preview;
+ }
+ shortAmmoTypes(){
+  const inventory=this.inventory().remaining,units=this.living();
+  return [...new Set(units.map(s=>WEAPONS[s.weapon].ammo))].filter(type=>inventory[type]<=units.filter(s=>WEAPONS[s.weapon].ammo===type).reduce((n,s)=>n+WEAPONS[s.weapon].mag*1.5,0));
+ }
+ loadoutSummary(){
+  const counts={};for(const s of this.living())counts[s.weapon]=(counts[s.weapon]||0)+1;
+  const styles=[];if((counts.m249||0)+(counts.m2||0)>=4)styles.push('火力支援');if((counts.m110||0)>=2)styles.push('精确射击');if((counts.mp5||0)+(counts.benelli||0)>=4)styles.push('近距防守');if((counts.m203||0)>=2)styles.push('榴弹支援');
+  return {counts,styles:styles.length?styles:['混合步兵'],shortAmmo:this.shortAmmoTypes()};
+ }
+ claimNodePayout(){
+  if(this.node.payoutClaimed)return;this.node.payoutClaimed=true;
+  const payout=this.node.payout||(this.node.flavor==='ammo'?{kind:'ammo',ammo:{n556:260,shell:28}}:this.node.flavor==='rescue'?{kind:'rescue',count:2}:null);
+  if(!payout)return;
+  if(payout.kind==='ammo'){for(const [type,qty] of Object.entries(payout.ammo))this.gainAmmo(type,qty);this.log('取得据点物资',Object.entries(payout.ammo).map(([type,qty])=>AMMO[type]+' '+qty+'发').join('、')+'；存入共享库存。');}
+  if(payout.kind==='rescue'){let added=0;for(let i=0;i<payout.count;i++)if(this.addSoldier('m4',true))added++;const spare=payout.count-added;if(spare)this.gainAmmo('n556',spare*90);this.log('救援完成','接应 '+added+' 名队员'+(spare?'；编制已满，另收下 '+spare*90+' 发5.56弹药':'，每人携带90发5.56弹药')+'。');}
+  if(payout.kind==='armory'){const result=this.applyLoadout(payout.card);this.log('接收军械',payout.card.name+' · '+result.changes.length+'名队员换装，配套弹药已入账。');}
+ }
+ finishWave(){
+  if(this.phase!=='combat')return;
+  if(this.wave>=2){this.claimNodePayout();if(this.nodeIndex>=3){this.end(true,'最终据点已清除');return;}}
   this.phase='reward';this.choices=this.rewardChoices();
   this.log('波次完成',this.wave>=2?'据点目标完成。选择一项奖励后前往路线。':'战斗暂停。选择一项奖励，准备下一波。');
  }
  rewardChoices(){
   const alive=this.living(),stage=this.nodeIndex;
-  const pool=[
-   {id:'ammo',kind:'ammo',name:'弹药补给箱',tag:'补给',icon:'▥',description:'补充当前编制使用的弹药。保持有限库存，跨据点携带。'},
-   {id:'recruits',kind:'recruits',name:'接应步枪小组',tag:'补员',icon:'＋',description:'3名M4A1步枪兵，携带270发5.56。人数上限35。'},
+  let weapons=Object.keys(LOADOUTS).filter(key=>LOADOUTS[key].minStage<=stage).map(key=>this.packageCard(key)).filter(card=>this.loadoutPreview(card).changes.length);
+  // A completely fixed roster may explicitly choose to dismantle a mount for a mobile loadout.
+  if(!weapons.length&&alive.length&&alive.every(s=>WEAPONS[s.weapon].fixed))weapons=Object.keys(LOADOUTS).filter(key=>LOADOUTS[key].minStage<=stage).map(key=>({...this.packageCard(key),allowFixed:true})).filter(card=>this.loadoutPreview(card).changes.length);
+  const supplies=[
+   {id:'ammo',kind:'ammo',name:'兼容弹药补给箱',tag:'补给',icon:'▥',ammo:this.ammoPackage(),description:'按当前弹种补充有限共享库存，由队员实际搬运。'},
+   {id:'recruits',kind:'recruits',name:'接应步枪小组',tag:'补员',icon:'＋',description:'最多3名M4A1步枪兵，每人携带90发5.56。人数上限35。'},
+   {id:'bags',kind:'bags',name:'扩充弹药携行',tag:'后勤',icon:'▧',description:'个人携弹上限提高20%，最多60%。不生成弹药。'}
+  ].filter(card=>card.kind!=='recruits'||alive.length<35).filter(card=>card.kind!=='bags'||this.mod.carry<1.6);
+  const upgrades=[
    {id:'armor',kind:'armor',name:'防护装备',tag:'防护',icon:'◇',description:'改善全队近身防护。伤害减免属于游戏近似，最多40%。'},
    {id:'repair',kind:'repair',name:'修缮与加固',tag:'工事',icon:'▤',description:'维修门与核心，并将后续据点门耐久提高15%。'},
-   {id:'drill',kind:'drill',name:'装填训练',tag:'训练',icon:'↻',description:'改善装填动作效率，换弹处理速度提高12%，上限40%。'},
-   {id:'bags',kind:'bags',name:'扩充弹药携行',tag:'后勤',icon:'▧',description:'个人携弹上限提高20%，最多60%。不生成弹药。'}
-  ];
-  const options=stage>=1?['mp5','benelli','m249','m110','m203']:['mp5','benelli','m249'];
-  if(stage>=2)options.push('m2');
-  for(const key of options){const w=WEAPONS[key];pool.push({id:'weapon-'+key,kind:'weapon',weapon:key,name:w.name+' 换装',tag:w.role,icon:w.icon,description:(w.fixed?'1名队员操作固定机枪':'2名合适队员换装')+'；附带 '+(w.fixed?200:w.carry*2)+' 发兼容弹药。'});}
-  const valid=pool.filter(x=>x.kind!=='recruits'||alive.length<35).filter(x=>x.kind!=='armor'||this.mod.armor<.4).filter(x=>x.kind!=='drill'||this.mod.reload<1.4).filter(x=>x.kind!=='bags'||this.mod.carry<1.6);
-  const draws=this.rng.shuffle(valid).slice(0,3);
-  if(Object.values(this.stock).reduce((a,b)=>a+b,0)<400&&!draws.some(x=>x.kind==='ammo'))draws[this.rng.int(3)]=pool[0];
-  return draws;
+   {id:'drill',kind:'drill',name:'装填训练',tag:'训练',icon:'↻',description:'改善装填动作效率，换弹处理速度提高12%，上限40%。'}
+  ].filter(card=>card.kind!=='armor'||this.mod.armor<.4).filter(card=>card.kind!=='drill'||this.mod.reload<1.4);
+  const counts=this.loadoutSummary().counts,weighted=[];
+  for(const card of weapons){const keys=card.weapons||[card.weapon],familiar=keys.reduce((n,key)=>n+(counts[key]||0),0);for(let i=0;i<1+Math.min(2,Math.floor(familiar/2));i++)weighted.push(card);}
+  const first=this.rng.pick(weighted.length?weighted:upgrades),second=this.shortAmmoTypes().length?supplies[0]:this.rng.pick(supplies);
+  const rest=[...weapons,...supplies,...upgrades].filter(card=>card.id!==first.id&&card.id!==second.id),third=this.rng.pick(rest);
+  return this.rng.shuffle([first,second,third]);
  }
  chooseReward(id){
   if(this.phase!=='reward')return false;
   const card=this.choices.find(x=>x.id===id);if(!card)return false;
   if(card.kind==='ammo'){
-   const types=new Set(this.living().map(s=>WEAPONS[s.weapon].ammo));
-   for(const t of types)this.gainAmmo(t,t==='shell'?56:t==='g40'?12:t==='n50'?200:600);
+   if(card.ammo){for(const [type,qty] of Object.entries(card.ammo))this.gainAmmo(type,qty);}
+   else {const types=new Set(this.living().map(s=>WEAPONS[s.weapon].ammo));for(const t of types)this.gainAmmo(t,t==='shell'?56:t==='g40'?12:t==='n50'?200:600);}
   }
   if(card.kind==='recruits')for(let i=0;i<3;i++)this.addSoldier('m4',true);
   if(card.kind==='armor')this.mod.armor=Math.min(.4,this.mod.armor+.09);
   if(card.kind==='drill')this.mod.reload=Math.min(1.4,this.mod.reload*1.12);
   if(card.kind==='bags')this.mod.carry=Math.min(1.6,this.mod.carry*1.2);
   if(card.kind==='repair'){this.mod.doors*=1.15;for(const g of this.gates){g.max*=1.15;g.hp=g.max;}this.core.hp=this.core.max;}
-  if(card.kind==='weapon'){
-   const w=WEAPONS[card.weapon],n=w.fixed?1:2;
-   this.gainAmmo(w.ammo,w.fixed?200:w.carry*2);
-   const units=this.living().filter(s=>s.task!=='supply').sort((a,b)=>(a.weapon===card.weapon?10:0)-(b.weapon===card.weapon?10:0));
-   for(const s of units.slice(0,n)){const old=WEAPONS[s.weapon];this.stock[old.ammo]+=s.mag+s.reserve;s.mag=0;s.reserve=0;s.weapon=card.weapon;s.reload=0;s.mount=null;s.setup=3;this.takeAmmo(s,this.capacity(s));}
-  }
+  if(card.kind==='weapon'||card.kind==='loadout')this.applyLoadout(card);
   this.rewardCount++;this.log('选择奖励',card.name);
   this.choices=[];
   if(this.wave>=2){
