@@ -369,3 +369,48 @@ test('new sites deploy a fixed-gun group toward forecast pressure while keeping 
  for(const s of g.living()){assert.ok(s.goal);assert.ok(Math.hypot(s.x-s.goal.x,s.y-s.goal.y)<.01,'setup completes before combat');}
  const positions=g.living().map(s=>[s.x,s.y]);g.tactic='reinforce_south';g.coordinate(true);assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions,'battle orders never teleport units');accounting(g);
 });
+
+function sharingScene(){
+ const g=active(71),donor=g.soldiers[0],recipient=g.soldiers[4],watch=g.soldiers[1];
+ for(const s of g.living())if(![donor,recipient,watch].includes(s)){s.hp=0;g.killSoldier(s);}
+ for(const [i,s] of [donor,recipient,watch].entries()){s.side=0;s.x=190+(i===1?10:0);s.y=i===2?173:153;s.goal={x:s.x,y:s.y};s.path=[];s.order={kind:'formation',priority:10,issuedAt:0,arrivedAt:0};s.guardPoint={...s.goal};s.vx=s.vy=0;s.maneuverUntil=0;}
+ g.teamRoster='';g.refreshTeams();g.enemies=[];g.time=10;burn(g,recipient);return {g,donor,recipient,watch};
+}
+test('nearby teammates hand over only spare ammunition after a timed handoff, without touching stock',()=>{
+ const {g,donor,recipient}=sharingScene(),before=g.inventory(),stock={...g.stock},positions=g.living().map(s=>[s.x,s.y]);
+ g.assignBuddyAmmo();assert.equal(g.ammoHandoffs.length,1);assert.equal(recipient.reserve,0);g.updateBuddyAmmo(1);assert.equal(recipient.reserve,0);
+ g.updateBuddyAmmo(.21);assert.equal(recipient.reserve,30);assert.equal(recipient.mag,0,'receiving ammunition still requires reloading');assert.equal(donor.reserve,30);assert.deepEqual(g.stock,stock);assert.deepEqual(g.inventory(),before);assert.deepEqual(g.living().map(s=>[s.x,s.y]),positions);assert.equal(g.buddyTransfers,1);g.updateBuddyAmmo(2);assert.equal(g.buddyTransfers,1);accounting(g);
+});
+test('buddy handoffs reject walls, distance, incompatible feed systems and imminent threats',()=>{
+ for(const condition of ['wall','distance','belt','threat']){
+  const {g,donor,recipient}=sharingScene();if(condition==='wall')g.map.crates.push({x:194,y:148,w:2,h:10});
+  if(condition==='distance'){recipient.x=210;recipient.goal.x=210;}if(condition==='belt'){burn(g,donor);donor.weapon='m249';g.takeAmmo(donor,200);}
+  if(condition==='threat'){const z=g.spawnEnemy('walker',0);z.x=195;z.y=146;z.entered=z.inside=true;}
+  g.assignBuddyAmmo();assert.equal(g.ammoHandoffs.length,0,condition);accounting(g);
+ }
+});
+test('interrupted handoffs do not transfer rounds when a donor dies or the recipient moves',()=>{
+ for(const condition of ['death','move','weapon','reload']){
+  const {g,donor,recipient}=sharingScene();g.assignBuddyAmmo();assert.equal(g.ammoHandoffs.length,1);g.updateBuddyAmmo(.8);
+  if(condition==='death'){donor.hp=0;g.killSoldier(donor);}if(condition==='move')recipient.goal={x:220,y:153};if(condition==='weapon'){recipient.weapon='mp5';}if(condition==='reload')donor.reload=2;
+  const inv=g.inventory();g.updateBuddyAmmo(.5);assert.equal(g.ammoHandoffs.length,0);assert.equal(recipient.reserve,0);assert.deepEqual(g.inventory(),inv);accounting(g);
+ }
+});
+test('a sharing pair stays at its reserved positions and is not recruited as a depot carrier',()=>{
+ const {g,donor,recipient}=sharingScene();g.assignBuddyAmmo();const goals=[{...donor.goal},{...recipient.goal}];g.assignSupplies();assert.notEqual(donor.task,'supply');assert.equal(recipient.supplyAssigned,null);g.coordinate();assert.deepEqual([donor.goal,recipient.goal],goals);accounting(g);
+});
+test('mid-handoff saves resume deterministically and old 0.4 saves retain inventory',()=>{
+ const {g,recipient}=sharingScene();g.assignBuddyAmmo();g.updateBuddyAmmo(.6);const h=Game.restore(g.serialize(),inferPolicy);g.updateBuddyAmmo(.61);h.updateBuddyAmmo(.61);assert.equal(h.serialize(),g.serialize());assert.equal(recipient.reserve,30);accounting(h);
+ const raw=JSON.parse(g.serialize());delete raw.ammoHandoffs;delete raw.buddyTransfers;const old=Game.restore(raw,inferPolicy);assert.deepEqual(old.inventory(),g.inventory());assert.deepEqual(old.ammoHandoffs,[]);assert.equal(old.buddyTransfers,0);
+});
+test('quiet reloads are staggered, retain partial magazines and require a ready covering partner',()=>{
+ const {g,donor,recipient,watch}=sharingScene();g.fired.n556+=15;donor.mag-=15;g.fired.n556+=15;watch.mag-=15;donor.lastContactAt=watch.lastContactAt=6;
+ assert.equal(g.shouldReload(donor,g.living(),null),true);g.stock.n556-=30;recipient.reserve=30;assert.equal(g.shouldReload(donor,g.living(),null),false,'an empty partner gets reload priority');g.stock.n556+=30;recipient.reserve=0;donor.reload=WEAPONS.m4.reload;assert.equal(g.shouldReload(watch,g.living(),null),false,'the second member keeps watching');
+ donor.reload=0;assert.equal(g.shouldReload(donor,g.living(),{id:1}),false,'no discretionary top-up during contact');donor.lastContactAt=9;assert.equal(g.shouldReload(donor,g.living(),null),false);
+ donor.lastContactAt=6;watch.mag=0;g.fired.n556+=15;assert.equal(g.shouldReload(donor,g.living(),null),false);accounting(g);
+});
+test('a handoff donor pauses fire and a completed recipient still performs a real reload',()=>{
+ const {g,donor,recipient}=sharingScene();g.assignBuddyAmmo();g.remaining=1000;g.spawnClock=999;g.decisionAge=-999;g.coordinationAge=-999;g.supplyClock=999;
+ const z=g.spawnEnemy('walker',0);z.x=195;z.y=103;z.hp=z.max=100000;const shots=donor.shots;for(let i=0;i<20;i++)g.step(1/30);assert.equal(donor.shots,shots,'a donor uses the short handoff interval to pass ammunition');
+ for(let i=0;i<25;i++)g.step(1/30);assert.equal(g.buddyTransfers,1);assert.equal(recipient.mag,0);assert.ok(recipient.reload>0,'received rounds are in reserve until reload completes');accounting(g);
+});
